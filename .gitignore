@@ -1,0 +1,21 @@
+# foobar2000 / Columns UI SDK 本体（著作権が別にあるため含めない）
+SDK-2025-03-07/
+
+# Visual Studio のビルド生成物
+Debug/
+Release/
+x64/
+.vs/
+*.obj
+*.pdb
+*.ilk
+*.log
+*.tlog
+*.user
+*.suo
+*.aps
+ipch/
+
+# ビルド成果物（DLL・fb2k-componentは別途Releaseページで配布するため含めない）
+*.dll
+*.fb2k-component
