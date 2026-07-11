@@ -335,6 +335,20 @@ This project is released under the [MIT License](LICENSE).
 
 ## Development / 開発について
 
-This component is developed using foobar2000 SDK 2025-03-07 and Columns UI SDK 3.5.0. To build it, download these SDKs separately and place them in an `SDK-2025-03-07` folder (this repository does not include the SDKs themselves, as they are third-party works).
+This component is developed using foobar2000 SDK 2025-03-07, Columns UI SDK 3.5.0, and WTL (Windows Template Library). None of these are included in this repository, as they are third-party works; you'll need to download them separately to build the project.
 
-本コンポーネントは foobar2000 SDK 2025-03-07 および Columns UI SDK 3.5.0 を用いて開発されています。ビルドには、これらのSDKを別途ダウンロードして `SDK-2025-03-07` フォルダに配置する必要があります（本リポジトリには第三者の著作物であるSDK本体は含まれていません）。
+To build:
+
+1. Clone this repository
+2. Download the foobar2000 SDK and Columns UI SDK, and place them in an `SDK-2025-03-07` folder at the repository root (sibling to the `Album Train` folder)
+3. Download WTL, and place it in a `WTL10_01_Release` folder at the repository root (sibling to the `Album Train` folder), so that its headers end up at `WTL10_01_Release/Include`
+4. Open `Album Train.slnx` and build
+
+本コンポーネントは foobar2000 SDK 2025-03-07、Columns UI SDK 3.5.0、および WTL（Windows Template Library）を用いて開発されています。いずれも第三者の著作物であるため本リポジトリには含まれておらず、ビルドには別途ダウンロードする必要があります。
+
+ビルド手順：
+
+1. このリポジトリをクローンする
+2. foobar2000 SDKとColumns UI SDKをダウンロードし、リポジトリ直下（`Album Train`フォルダと同じ階層）に`SDK-2025-03-07`フォルダとして配置する
+3. WTLをダウンロードし、リポジトリ直下（`Album Train`フォルダと同じ階層）に`WTL10_01_Release`フォルダとして配置する（ヘッダーが`WTL10_01_Release/Include`に来る形にする）
+4. `Album Train.slnx`を開いてビルドする
