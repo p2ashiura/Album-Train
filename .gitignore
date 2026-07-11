@@ -1,6 +1,9 @@
 # foobar2000 / Columns UI SDK 本体（著作権が別にあるため含めない）
 SDK-2025-03-07/
 
+# WTL（第三者ライブラリ、著作権が別にあるため含めない）
+WTL10_01_Release/
+
 # Visual Studio のビルド生成物
 Debug/
 Release/

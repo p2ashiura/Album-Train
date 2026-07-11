@@ -1,4 +1,4 @@
-// albumtrain.cpp
+﻿// albumtrain.cpp
 // foobar2000 SDK 2025-03-07 / Columns UI 3.5.0 対応
 // アートワークを取得・表示するUIパネル（container_uie_window_v3 版）
 
