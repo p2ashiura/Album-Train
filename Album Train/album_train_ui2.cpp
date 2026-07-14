@@ -539,11 +539,13 @@ namespace {
         };
 
         // -------------------------------------------------------
-        // ライブラリインデックス（軽量：アルバム名と代表トラックのみ）
+        // ライブラリインデックス（アルバム名・代表トラックに加え、
+        // クリック時の全曲再生・Properties表示のため全曲リストも保持する）
         // -------------------------------------------------------
         struct LibAlbum {
             pfc::string8      album_name;
             metadb_handle_ptr first_track;
+            std::vector<metadb_handle_ptr> tracks;  // ディスク番号・トラック番号順
         };
 
         // -------------------------------------------------------
@@ -717,7 +719,8 @@ namespace {
         {
             return uie::container_window_v3_config(
                 L"{ALBUMTRAIN-WINDOW-CUI-V3}",
-                true  // 透明背景を使う（自前で背景を塗るのでtrueでもOK）
+                true,        // 透明背景を使う（自前で背景を塗るのでtrueでもOK）
+                CS_DBLCLKS   // WM_LBUTTONDBLCLKを受け取るために必要
             );
         }
 
@@ -755,6 +758,10 @@ namespace {
 
             case WM_LBUTTONDOWN:
                 OnLButtonDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                return 0;
+
+            case WM_LBUTTONDBLCLK:
+                OnLButtonDblClk(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
                 return 0;
 
             case WM_MOUSEWHEEL:
@@ -882,7 +889,10 @@ namespace {
 
             t_size count = tracks.get_count();
 
-            std::map<std::string, metadb_handle_ptr> album_map;
+            // アルバム名 → 全曲リストを1回の走査で集計する
+            // （代表トラックは各アルバムで最初に見つかったトラックとし、
+            //   従来の挙動と完全に一致させる）
+            std::map<std::string, std::vector<metadb_handle_ptr>> album_map;
             for (t_size i = 0; i < count; i++)
             {
                 metadb_handle_ptr track = tracks[i];
@@ -890,15 +900,27 @@ namespace {
                 track->get_info(info);
                 const char* album = info.meta_get("ALBUM", 0);
                 std::string album_name = album ? album : "Unknown";
-                if (album_map.find(album_name) == album_map.end())
-                    album_map[album_name] = track;
+                album_map[album_name].push_back(track);
             }
 
             for (auto& kv : album_map)
             {
                 LibAlbum a;
                 a.album_name = kv.first.c_str();
-                a.first_track = kv.second;
+                a.first_track = kv.second.front();
+
+                // ディスク番号・トラック番号順にソートしてから保持する。
+                // クリック時（AddAlbumToNewPlaylist経由）・Properties表示の
+                // どちらも、このソート済みリストをそのまま使い回せる
+                metadb_handle_list sorted;
+                for (auto& t : kv.second)
+                    sorted.add_item(t);
+                sorted.sort_by_format("%discnumber%|%tracknumber%", nullptr);
+
+                a.tracks.reserve(sorted.get_count());
+                for (t_size i = 0; i < sorted.get_count(); i++)
+                    a.tracks.push_back(sorted[i]);
+
                 m_lib_albums.push_back(a);
             }
 
@@ -1652,6 +1674,9 @@ namespace {
             float draw_y = ((float)height - content_height) / 2.0f;
             if (draw_y < 5.0f) draw_y = 5.0f;
 
+            // テキスト位置固定オプション用：OnPaintと同じ計算式で固定Y座標を1回だけ求める
+            float fixedTextTopY = draw_y + max_art_size + (float)g_cfg_art_text_gap.get();
+
             float center_x = (float)width / 2.0f;
             float max_dist = (float)width / 2.0f;
 
@@ -1678,8 +1703,30 @@ namespace {
                 float draw_x = base_draw_x + (base_art_size - art_size) / 2.0f;
                 float draw_y_adj = draw_y + (max_art_size - art_size) / 2.0f;
 
+                // ヒット領域の下端：テキスト表示が有効な場合は、OnPaintと全く同じ
+                // 計算式で求めた「表示中の最後のテキスト行の下端」までを、
+                // アートワークとの間の Artwork-Text Gap も含めて1つの連続した
+                // 矩形とみなす。テキスト非表示時は従来通りアートワーク下端まで。
+                float hitBottom = draw_y_adj + art_size;
+                if (g_cfg_show_album_name.get())
+                {
+                    float lineHeight = (float)GetFontLineHeight();
+                    float gap1 = (float)g_cfg_art_text_gap.get();
+                    float textTopY = g_cfg_fix_text_position.get()
+                        ? fixedTextTopY
+                        : (draw_y_adj + art_size + gap1);
+
+                    hitBottom = textTopY + lineHeight;
+
+                    if (g_cfg_use_second_line.get())
+                    {
+                        float gap2 = (float)g_cfg_line_gap.get();
+                        hitBottom = textTopY + lineHeight + gap2 + lineHeight;
+                    }
+                }
+
                 if (x >= draw_x && x <= draw_x + art_size &&
-                    y >= draw_y_adj && y <= draw_y_adj + art_size)
+                    y >= draw_y_adj && y <= hitBottom)
                 {
                     if (!entry.first_track.is_valid()) return false;
                     out_album_name = entry.album_name;
@@ -1691,11 +1738,41 @@ namespace {
         }
 
         // =======================================================
-        // 指定アルバムの全曲を、メディアライブラリ全体から収集し
-        // ディスク番号・トラック番号順に並べる
+        // アルバム名から m_lib_albums 内の該当エントリを探す
+        // m_lib_albums は BuildLibraryIndex 内で std::map の走査順（＝アルバム名の
+        // 昇順）のまま構築されているため、二分探索で高速に見つけられる
+        // =======================================================
+        const LibAlbum* FindLibAlbum(const pfc::string8& album_name) const
+        {
+            auto it = std::lower_bound(
+                m_lib_albums.begin(), m_lib_albums.end(), album_name,
+                [](const LibAlbum& a, const pfc::string8& name) {
+                    return strcmp(a.album_name.c_str(), name.c_str()) < 0;
+                });
+            if (it != m_lib_albums.end() && it->album_name == album_name)
+                return &(*it);
+            return nullptr;
+        }
+
+        // =======================================================
+        // 指定アルバムの全曲を、ディスク番号・トラック番号順に収集する
+        // 通常は BuildLibraryIndex で事前に構築・ソート済みの全曲リストを
+        // そのまま使う（クリックのたびにライブラリ全体を走査する必要がなく、
+        // メインスレッドのブロッキングを避けられる）。
+        // ライブラリインデックスに見当たらない想定外のケースのみ、
+        // 従来通りライブラリ全体を走査するフォールバックを残す。
         // =======================================================
         void CollectAlbumTracks(const pfc::string8& album_name, metadb_handle_ptr fallback_track, metadb_handle_list& out_tracks)
         {
+            const LibAlbum* found = FindLibAlbum(album_name);
+            if (found && !found->tracks.empty())
+            {
+                for (auto& t : found->tracks)
+                    out_tracks.add_item(t);
+                return;
+            }
+
+            // フォールバック：ライブラリインデックスに見つからない場合のみ
             static_api_ptr_t<library_manager> lm;
             metadb_handle_list all_tracks;
             lm->get_all_items(all_tracks);
@@ -1743,7 +1820,31 @@ namespace {
         }
 
         // =======================================================
-        // クリックで再生
+        // 指定アルバムの全曲を新規プレイリストに追加する（再生はしない）
+        // 戻り値：作成したプレイリストのインデックス（失敗時はpfc::infinite_size）
+        // =======================================================
+        t_size AddAlbumToNewPlaylist(const pfc::string8& album_name, metadb_handle_ptr track)
+        {
+            metadb_handle_list album_tracks;
+            CollectAlbumTracks(album_name, track, album_tracks);
+            if (album_tracks.get_count() == 0) return pfc::infinite_size;
+
+            static_api_ptr_t<playlist_manager> pm;
+
+            t_size new_playlist = pm->create_playlist(
+                "Album Train", pfc::infinite_size, pfc::infinite_size);
+            if (new_playlist == pfc::infinite_size) return pfc::infinite_size;
+
+            pm->playlist_add_items(new_playlist, album_tracks,
+                bit_array_false());
+            pm->set_active_playlist(new_playlist);
+
+            return new_playlist;
+        }
+
+        // =======================================================
+        // シングル左クリック：クリックしたアルバムの全曲を新規プレイリストに
+        // 追加するのみ（再生はしない）
         // =======================================================
         void OnLButtonDown(int x, int y)
         {
@@ -1751,23 +1852,52 @@ namespace {
             metadb_handle_ptr track;
             if (!HitTestAlbum(x, y, album_name, track)) return;
 
-            metadb_handle_list album_tracks;
-            CollectAlbumTracks(album_name, track, album_tracks);
-            if (album_tracks.get_count() == 0) return;
-
-            static_api_ptr_t<playlist_manager> pm;
-
-            t_size new_playlist = pm->create_playlist(
-                "Album Train", pfc::infinite_size, pfc::infinite_size);
+            t_size new_playlist = AddAlbumToNewPlaylist(album_name, track);
             if (new_playlist == pfc::infinite_size) return;
 
-            pm->playlist_add_items(new_playlist, album_tracks,
-                bit_array_false());
+            // ダブルクリックとして検知された場合に、このプレイリストを
+            // 再利用できるよう覚えておく
+            m_lastClickPlaylist = new_playlist;
+            m_lastClickAlbumName = album_name;
+        }
 
-            pm->set_active_playlist(new_playlist);
-            pm->set_playing_playlist(new_playlist);
-            pm->playlist_set_focus_item(new_playlist, 0);
-            pm->playlist_execute_default_action(new_playlist, 0);
+        // =======================================================
+        // ダブル左クリック：プレイリストに追加した上で1曲目を再生する
+        // Windowsはダブルクリックの直前に必ずシングルクリックのメッセージ
+        // (WM_LBUTTONDOWN)も送るため、OnLButtonDownによる追加が既に
+        // 行われている。同じアルバムに対するものであれば、そのプレイリスト
+        // をそのまま再利用し、二重にプレイリストが作られないようにする
+        // =======================================================
+        void OnLButtonDblClk(int x, int y)
+        {
+            pfc::string8 album_name;
+            metadb_handle_ptr track;
+            if (!HitTestAlbum(x, y, album_name, track)) return;
+
+            static_api_ptr_t<playlist_manager> pm;
+            t_size playlist = pfc::infinite_size;
+
+            if (m_lastClickPlaylist != pfc::infinite_size &&
+                m_lastClickAlbumName == album_name &&
+                m_lastClickPlaylist < pm->get_playlist_count())
+            {
+                playlist = m_lastClickPlaylist;
+            }
+            else
+            {
+                // 直前のシングルクリック処理が見つからない場合
+                // （極端に短い間隔でのダブルクリック等）のフォールバック
+                playlist = AddAlbumToNewPlaylist(album_name, track);
+                if (playlist == pfc::infinite_size) return;
+            }
+
+            pm->set_active_playlist(playlist);
+            pm->set_playing_playlist(playlist);
+            pm->playlist_set_focus_item(playlist, 0);
+            pm->playlist_execute_default_action(playlist, 0);
+
+            m_lastClickPlaylist = pfc::infinite_size;
+            m_lastClickAlbumName = "";
         }
 
         // =======================================================
@@ -2874,6 +3004,11 @@ namespace {
         std::string                           m_bgImagePathLoaded;
         HBITMAP                               m_noArtImageBitmap = NULL;
         std::string                           m_noArtImagePathLoaded;
+
+        // シングル左クリックで作成したプレイリストを、直後のダブルクリックで
+        // 再利用するための記憶領域（未設定はpfc::infinite_size）
+        t_size                                 m_lastClickPlaylist = pfc::infinite_size;
+        pfc::string8                           m_lastClickAlbumName;
     };
      
     // Columns UI パネルとして登録

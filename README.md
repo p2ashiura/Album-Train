@@ -42,16 +42,18 @@ After installation, add the "Album Train" panel to your layout from Columns UI's
 
 ### Basic operation / 基本操作
 
-- **Left click**: Adds all tracks from the clicked album to a new playlist and plays it
+- **Left click**: Adds all tracks from the clicked album to a new playlist (doesn't play)
+- **Double-click**: Adds all tracks from the clicked album to a new playlist and plays it from the first track
 - **Right click**:
-  - On empty space (no artwork) → shows `Settings...` only
-  - On artwork → shows `Settings...` plus `Properties`. Clicking `Properties` opens the Properties window with all tracks of that album selected
+  - On empty space → shows `Settings...` only
+  - On artwork (or its album name text) → shows `Settings...` plus `Properties`. Clicking `Properties` opens the Properties window with all tracks of that album selected
 - **Mouse wheel**: Manual scrolling (can be turned on/off in settings)
 
-- **左クリック**：クリックしたアルバムの全曲を新規プレイリストに追加し、再生します
+- **左クリック**：クリックしたアルバムの全曲を新規プレイリストに追加します（再生はしません）
+- **ダブルクリック**：クリックしたアルバムの全曲を新規プレイリストに追加し、1曲目から再生します
 - **右クリック**：
-  - アートワーク以外の場所 → `Settings...`（設定ダイアログ）のみ表示
-  - アートワーク上 → `Settings...` に加えて `Properties` を表示。クリックすると、そのアルバム全曲が選択された状態で Properties ウィンドウが開きます
+  - 何もない場所 → `Settings...`（設定ダイアログ）のみ表示
+  - アートワーク上（またはそのアルバム名テキスト上）→ `Settings...` に加えて `Properties` を表示。クリックすると、そのアルバム全曲が選択された状態で Properties ウィンドウが開きます
 - **マウスホイール**：手動でのスクロール（設定でオン/オフ可能）
 
 ### Settings dialog / 設定ダイアログ
@@ -267,6 +269,12 @@ v3.3.2: Fixed layout overlap in the Background group; grey out linked to Use Ima
         Backgroundグループのレイアウト重なり修正・Use Image連動グレーアウト
 v3.3.3: Widened the settings dialog and groups to fix "Browse..." text clipping
         設定ダイアログ・グループ幅拡張による「Browse...」テキスト見切れの解消
+v3.3.4: Extended the click hit area (artwork top through the bottom of the last text line now counts as one continuous region)
+        クリック判定範囲の拡張（アートワーク上端〜最後のテキスト行下端までを1つの連続領域として判定）
+v3.4.0: Split left-click into single (add to playlist only) and double (add and play the first track)
+        左クリックのシングル/ダブル分離（シングル：プレイリスト追加のみ／ダブル：追加＋1曲目再生）
+v3.4.1: Fixed a momentary stutter in the Album Train's scrolling on click (per-album track lists are now pre-built and sorted, removing the need to scan the whole library on every click)
+        クリック時にアルバムトレインの流れが一瞬停止する現象を解消（アルバムごとの全曲リストを事前構築・ソートし、クリック時のライブラリ全走査を排除）
 ```
 
 </details>
@@ -285,7 +293,6 @@ v3.3.3: Widened the settings dialog and groups to fix "Browse..." text clipping
 - Support for foobar2000's Default UI
 
 ### Known limitations / bugs
-- Cancel doesn't work in Columns UI's font selection dialog (a Columns UI limitation)
 - Occasionally an album that does have artwork is shown grey even when "Show Albums Without Artwork" is off (low reproducibility, under investigation)
 - Background transparency can't be verified on 64-bit foobar2000 since Panel Stack Splitter isn't available there (implemented internally, not exposed)
 
@@ -295,7 +302,7 @@ v3.3.3: Widened the settings dialog and groups to fix "Browse..." text clipping
 ### Under consideration (undecided)
 - Consider adding more steps to the Scroll Speed slider
 - Font size range (tied to panel height)
-- Support clicking the text display area (not just artwork) to play / open Properties, treating the area from the top of the artwork to the bottom of the last text line as one continuous hit region
+- Hover highlight around artwork on mouse-over (now that the click hit area covers artwork + text as one region, how far the visual frame itself should extend — artwork only, or artwork and text together — needs a separate design decision, considering the gap between artwork and text)
 
 ### Future ideas
 - Expanding the kinds of content that can be shown as a background, such as a visualizer
@@ -310,7 +317,6 @@ v3.3.3: Widened the settings dialog and groups to fix "Browse..." text clipping
 - foobar2000のDefault UIへの対応
 
 ### 既知の制約・バグ
-- Columns UIのフォント設定画面のCancelが効かない（Columns UI本体の仕様）
 - 「Show Albums Without Artwork」無効時に実際はアートワークがあるアルバムが稀にグレー表示される（再現性低、調査中）
 - 背景透明化機能は64bit版foobar2000でPanel Stack Splitterが使えず検証不可（内部実装済み・非公開）
 
@@ -320,7 +326,7 @@ v3.3.3: Widened the settings dialog and groups to fix "Browse..." text clipping
 ### 今後の検討事項（未確定）
 - Scroll Speedのスライダをさらに多段階にすることを検討
 - フォントサイズ変更の許容範囲（パネル高さとの連動）
-- テキスト表示部分をクリックした場合の再生・Properties対応（アートワーク上端から最後のテキスト行下端までを1つの連続領域として判定する方式を想定）
+- マウスオーバー時のアートワーク枠表示（クリック判定範囲がアートワーク＋テキストの連続領域になったことを踏まえ、枠自体をどこまで描くか——アートワークのみか、テキストまで含めるか——はアートワークとテキストの間隔を考慮した上で別途設計）
 
 ### 将来構想
 - ヴィジュアライザーなど、背景に表示できるコンテンツの種類を増やす構想
