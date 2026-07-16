@@ -89,6 +89,9 @@ namespace {
     static const int IDC_FIXTEXTPOS_CHECK = 1038;
     static const int IDC_ARTWORK_QUALITY_COMBO = 1039;
     static const int IDC_BG_IMAGE_QUALITY_COMBO = 1040;
+    static const int IDC_HOVER_FRAME_CHECK = 1041;
+    static const int IDC_HOVER_FRAME_COLOR_BTN = 1042;
+    static const int IDC_HOVER_FRAME_COLOR_SWATCH = 1043;
 
     // -------------------------------------------------------
     // 設定項目：スクロール速度（1～10段階、初期値5）
@@ -258,6 +261,23 @@ namespace {
     { 0x86ace013, 0x68df, 0x2457,{0x9b,0x35,0x7e,0xc0,0x13,0x57,0x9b,0xdf} };
 
     static cfg_bool g_cfg_use_perspective(guid_cfg_use_perspective, true);
+
+    // -------------------------------------------------------
+    // 設定項目：マウスオーバー時にアートワークへ枠を表示するか（true=有効）
+    // -------------------------------------------------------
+    static const GUID guid_cfg_show_hover_frame =
+    { 0x9cace013, 0x68df, 0x2457,{0x9b,0x35,0x7e,0xc0,0x13,0x57,0x9b,0xdf} };
+
+    static cfg_bool g_cfg_show_hover_frame(guid_cfg_show_hover_frame, true);
+
+    // -------------------------------------------------------
+    // 設定項目：マウスオーバー枠のカスタム色
+    // （Use Theme Coloursが有効な場合はColumns UIの
+    //  「Selected item frame」色に追従する）
+    // -------------------------------------------------------
+    static const GUID guid_cfg_hover_frame_color =
+    { 0x9dace013, 0x68df, 0x2457,{0x9b,0x35,0x7e,0xc0,0x13,0x57,0x9b,0xdf} };
+    static cfg_struct_t<COLORREF> g_cfg_hover_frame_color(guid_cfg_hover_frame_color, RGB(255, 255, 255));
 
     // -------------------------------------------------------
     // 設定項目：流れる方向（true=右から左、false=左から右）
@@ -591,6 +611,8 @@ namespace {
             int      artworkQuality = 0;  // 0=High/1=Middle/2=Low
             int      bgImageQuality = 0;  // 0=High/1=Middle/2=Low（Backgroundグループ専用）
             bool     fixTextPosition = false;
+            bool     showHoverFrame = true;
+            COLORREF hoverFrameColor = RGB(255, 255, 255);
         };
 
         struct SettingsDialogContext
@@ -600,6 +622,7 @@ namespace {
             HBRUSH hBgBrush = NULL;
             HBRUSH hTextBrush = NULL;
             HBRUSH hNoArtBrush = NULL;
+            HBRUSH hHoverFrameBrush = NULL;
         };
 
         // -------------------------------------------------------
@@ -688,6 +711,13 @@ namespace {
             return g_cfg_noart_color.get();
         }
 
+        COLORREF GetHoverFrameColor() const
+        {
+            if (g_cfg_use_theme_colors.get())
+                return GetThemeColor(cui::colours::colour_active_item_frame);
+            return g_cfg_hover_frame_color.get();
+        }
+
         // =======================================================
         // uie::base_window_extension / window が要求する実装
         // =======================================================
@@ -762,6 +792,15 @@ namespace {
 
             case WM_LBUTTONDBLCLK:
                 OnLButtonDblClk(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                return 0;
+
+            case WM_MOUSEMOVE:
+                OnMouseMove(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                return 0;
+
+            case WM_MOUSELEAVE:
+                m_mouseInWindow = false;
+                if (m_hwnd) InvalidateRect(m_hwnd, NULL, FALSE);
                 return 0;
 
             case WM_MOUSEWHEEL:
@@ -1484,6 +1523,44 @@ namespace {
             float center_x = (float)width / 2.0f;
             float max_dist = (float)width / 2.0f;
 
+            // マウスオーバー枠表示のため、事前に「どのエントリの上に
+            // マウスがあるか」をHitTestAlbumと同様の考え方で判定しておく
+            // （重なっている場合は手前優先＝末尾から探して最初に見つかったもの）
+            QueueEntry* hoverEntry = nullptr;
+            if (g_cfg_show_hover_frame.get() && m_mouseInWindow)
+            {
+                for (auto it = m_queue.rbegin(); it != m_queue.rend(); ++it)
+                {
+                    auto& e = *it;
+                    float base_draw_x = e.x;
+                    if (base_draw_x + base_art_size < 0 || base_draw_x > width) continue;
+
+                    float scale = 1.0f;
+                    if (g_cfg_use_perspective.get())
+                    {
+                        float entry_center = base_draw_x + base_art_size / 2.0f;
+                        float dist = fabs(entry_center - center_x);
+                        float t = dist / max_dist;
+                        if (t > 1.0f) t = 1.0f;
+                        scale = 1.2f - t * 0.2f;
+                    }
+
+                    float art_size = base_art_size * scale;
+                    if (art_size < 10.0f) art_size = 10.0f;
+                    art_size = (float)((int)(art_size / 2.0f + 0.5f) * 2);
+
+                    float draw_x = base_draw_x + (base_art_size - art_size) / 2.0f;
+                    float draw_y_adj = draw_y + (max_art_size - art_size) / 2.0f;
+
+                    if ((float)m_mouseX >= draw_x && (float)m_mouseX <= draw_x + art_size &&
+                        (float)m_mouseY >= draw_y_adj && (float)m_mouseY <= draw_y_adj + art_size)
+                    {
+                        hoverEntry = &e;
+                        break;
+                    }
+                }
+            }
+
             for (auto& entry : m_queue)
             {
                 float base_draw_x = entry.x;
@@ -1568,6 +1645,25 @@ namespace {
                         FillRect(bufDC, &noArtRc, grayBrush);
                         DeleteObject(grayBrush);
                     }
+                }
+
+                // マウスオーバー枠：アートワークのみを縁取る（固定2px）
+                if (hoverEntry == &entry)
+                {
+                    RECT frameRc = {
+                        (int)(draw_x + 0.5f), (int)(draw_y_adj + 0.5f),
+                        (int)(draw_x + art_size + 0.5f), (int)(draw_y_adj + art_size + 0.5f)
+                    };
+
+                    HPEN framePen = CreatePen(PS_SOLID, 2, GetHoverFrameColor());
+                    HPEN oldPen = (HPEN)SelectObject(bufDC, framePen);
+                    HBRUSH oldBrush = (HBRUSH)SelectObject(bufDC, GetStockObject(NULL_BRUSH));
+
+                    Rectangle(bufDC, frameRc.left, frameRc.top, frameRc.right, frameRc.bottom);
+
+                    SelectObject(bufDC, oldBrush);
+                    SelectObject(bufDC, oldPen);
+                    DeleteObject(framePen);
                 }
 
                 if (g_cfg_show_album_name.get())
@@ -1820,6 +1916,29 @@ namespace {
         }
 
         // =======================================================
+        // マウスオーバー枠表示のため、現在のマウス位置を記憶する
+        // ウィンドウに入った直後にTrackMouseEventを呼び、ウィンドウから
+        // 出た際にWM_MOUSELEAVEを受け取れるようにする
+        // =======================================================
+        void OnMouseMove(int x, int y)
+        {
+            if (!m_mouseInWindow)
+            {
+                TRACKMOUSEEVENT tme = {};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = m_hwnd;
+                TrackMouseEvent(&tme);
+            }
+
+            m_mouseInWindow = true;
+            m_mouseX = x;
+            m_mouseY = y;
+
+            if (m_hwnd) InvalidateRect(m_hwnd, NULL, FALSE);
+        }
+
+        // =======================================================
         // 指定アルバムの全曲を新規プレイリストに追加する（再生はしない）
         // 戻り値：作成したプレイリストのインデックス（失敗時はpfc::infinite_size）
         // =======================================================
@@ -1961,6 +2080,8 @@ namespace {
             g_cfg_artwork_quality = ctx->staging.artworkQuality;
             g_cfg_bg_image_quality = ctx->staging.bgImageQuality;
             g_cfg_fix_text_position = ctx->staging.fixTextPosition;
+            g_cfg_show_hover_frame = ctx->staging.showHoverFrame;
+            g_cfg_hover_frame_color = ctx->staging.hoverFrameColor;
 
             // フォーマット文字列は、コミット時にエディットボックスから直接取得する
             HWND editBox = GetDlgItem(hDlg, IDC_FORMAT_EDIT);
@@ -2044,6 +2165,8 @@ namespace {
                 ctx->staging.fixTextPosition = g_cfg_fix_text_position.get();
                 ctx->staging.artworkQuality = (int)g_cfg_artwork_quality.get();
                 ctx->staging.bgImageQuality = (int)g_cfg_bg_image_quality.get();
+                ctx->staging.showHoverFrame = g_cfg_show_hover_frame.get();
+                ctx->staging.hoverFrameColor = g_cfg_hover_frame_color.get();
 
 
                 SetWindowLongPtr(hDlg, GWLP_USERDATA, (LONG_PTR)ctx);
@@ -2121,7 +2244,7 @@ namespace {
                 yRight += themeGroupH + groupGap;
 
                 // ---- グループ3（左列）：Artwork ----
-                int artworkGroupH = titleSpace + rowH * 6 + groupPad;
+                int artworkGroupH = titleSpace + rowH * 8 + groupPad;
                 CreateWindowEx(0, _T("BUTTON"), _T("Artwork"),
                     WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                     MARGIN, yLeft, GROUP_W, artworkGroupH, hDlg, NULL, NULL, NULL);
@@ -2143,6 +2266,33 @@ namespace {
                 SendMessage(artworkQualityCombo, CB_ADDSTRING, 0, (LPARAM)_T("Low"));
                 SendMessage(artworkQualityCombo, CB_SETCURSEL, ctx->staging.artworkQuality, 0);
                 EnableWindow(artworkQualityCombo, !ctx->staging.stabilityMode);
+                naY += rowH;
+
+                // --- Show Hover Frame（マウスオーバー時にアートワークへ枠を表示） ---
+                HWND hoverFrameCheck = CreateWindowEx(0, _T("BUTTON"), _T("Show Hover Frame"),
+                    WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                    CONTENT_X, naY, CONTENT_W, rowH, hDlg, (HMENU)(INT_PTR)IDC_HOVER_FRAME_CHECK,
+                    NULL, NULL);
+                SendMessage(hoverFrameCheck, BM_SETCHECK,
+                    ctx->staging.showHoverFrame ? BST_CHECKED : BST_UNCHECKED, 0);
+                naY += rowH;
+
+                // --- Show Hover Frame色変更UI ---
+                CreateWindowEx(0, _T("STATIC"), _T("Colour:"),
+                    WS_CHILD | WS_VISIBLE,
+                    CONTENT_X, naY + (rowH - labelH) / 2, SWATCH_LABEL_W, labelH, hDlg, NULL,
+                    NULL, NULL);
+
+                HWND hoverFrameSwatch = CreateWindowEx(0, _T("STATIC"), NULL,
+                    WS_CHILD | WS_VISIBLE,
+                    CONTENT_X + SWATCH_LABEL_W + SWATCH_GAP, naY + (rowH - swatchH) / 2, SWATCH_W, swatchH,
+                    hDlg, (HMENU)(INT_PTR)IDC_HOVER_FRAME_COLOR_SWATCH, NULL, NULL);
+                SetWindowSubclass(hoverFrameSwatch, ColorSwatchSubclassProc, 0, (DWORD_PTR)&ctx->hHoverFrameBrush);
+
+                HWND hoverFrameColorBtn = CreateWindowEx(0, _T("BUTTON"), _T("Change..."),
+                    WS_CHILD | WS_VISIBLE,
+                    SWATCH_BTN_X, naY, SWATCH_BTN_W, rowH, hDlg, (HMENU)(INT_PTR)IDC_HOVER_FRAME_COLOR_BTN,
+                    NULL, NULL);
                 naY += rowH;
 
                 // --- Perspective Effect ---
@@ -2464,6 +2614,7 @@ namespace {
                 ctx->hBgBrush = CreateSolidBrush(ctx->staging.bgColor);
                 ctx->hTextBrush = CreateSolidBrush(ctx->staging.textColor);
                 ctx->hNoArtBrush = CreateSolidBrush(ctx->staging.noArtColor);
+                ctx->hHoverFrameBrush = CreateSolidBrush(ctx->staging.hoverFrameColor);
 
                 // テーマ追従・画像モードの状態に応じて、色ボタン／画像ボタンの有効性をまとめて初期反映する
                 bool useTheme = ctx->staging.useThemeColors;
@@ -2569,6 +2720,8 @@ namespace {
                 }
  
                 UpdateTextGroupEnables(hDlg, ctx);
+                EnableWindow(GetDlgItem(hDlg, IDC_HOVER_FRAME_COLOR_BTN),
+                    ctx->staging.showHoverFrame && !ctx->staging.useThemeColors);
 
                 SetWindowPos(hDlg, NULL, posX, posY, winW, winH, SWP_NOZORDER);
 
@@ -2636,6 +2789,7 @@ namespace {
 
                     EnableWindow(GetDlgItem(hDlg, IDC_BG_COLOR_BTN), !checked && ctx && !ctx->staging.bgUseImage);
                     EnableWindow(GetDlgItem(hDlg, IDC_NOART_COLOR_BTN), !checked && ctx && !ctx->staging.noArtUseImage);
+                    EnableWindow(GetDlgItem(hDlg, IDC_HOVER_FRAME_COLOR_BTN), !checked && ctx && ctx->staging.showHoverFrame);
                     UpdateTextGroupEnables(hDlg, ctx);
                     return TRUE;
                 }
@@ -2772,6 +2926,35 @@ namespace {
                     }
                     return TRUE;
                 }
+                else if (LOWORD(wp) == IDC_HOVER_FRAME_CHECK)
+                {
+                    HWND check = GetDlgItem(hDlg, IDC_HOVER_FRAME_CHECK);
+                    bool checked = (SendMessage(check, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                    if (ctx) ctx->staging.showHoverFrame = checked;
+
+                    EnableWindow(GetDlgItem(hDlg, IDC_HOVER_FRAME_COLOR_BTN),
+                        checked && ctx && !ctx->staging.useThemeColors);
+                    return TRUE;
+                }
+                else if (LOWORD(wp) == IDC_HOVER_FRAME_COLOR_BTN)
+                {
+                    static COLORREF customColors[16] = {};
+                    CHOOSECOLOR cc = {};
+                    cc.lStructSize = sizeof(cc);
+                    cc.hwndOwner = hDlg;
+                    cc.rgbResult = ctx ? ctx->staging.hoverFrameColor : g_cfg_hover_frame_color.get();
+                    cc.lpCustColors = customColors;
+                    cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+
+                    if (ChooseColor(&cc) && ctx)
+                    {
+                        ctx->staging.hoverFrameColor = cc.rgbResult;
+                        if (ctx->hHoverFrameBrush) DeleteObject(ctx->hHoverFrameBrush);
+                        ctx->hHoverFrameBrush = CreateSolidBrush(cc.rgbResult);
+                        InvalidateRect(GetDlgItem(hDlg, IDC_HOVER_FRAME_COLOR_SWATCH), NULL, TRUE);
+                    }
+                    return TRUE;
+                }
                 else if (LOWORD(wp) == IDC_ADD_LINE_BTN)
                 {
                     HWND check = GetDlgItem(hDlg, IDC_ADD_LINE_BTN);
@@ -2885,6 +3068,7 @@ namespace {
                     if (ctx->hBgBrush) DeleteObject(ctx->hBgBrush);
                     if (ctx->hTextBrush) DeleteObject(ctx->hTextBrush);
                     if (ctx->hNoArtBrush) DeleteObject(ctx->hNoArtBrush);
+                    if (ctx->hHoverFrameBrush) DeleteObject(ctx->hHoverFrameBrush);
                     delete ctx;
                     SetWindowLongPtr(hDlg, GWLP_USERDATA, 0);
                 }
@@ -3009,6 +3193,11 @@ namespace {
         // 再利用するための記憶領域（未設定はpfc::infinite_size）
         t_size                                 m_lastClickPlaylist = pfc::infinite_size;
         pfc::string8                           m_lastClickAlbumName;
+
+        // マウスオーバー枠表示のためのマウス位置追跡
+        int                                     m_mouseX = -1;
+        int                                     m_mouseY = -1;
+        bool                                    m_mouseInWindow = false;
     };
      
     // Columns UI パネルとして登録
