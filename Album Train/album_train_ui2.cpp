@@ -15,6 +15,7 @@
 #include <foobar2000/SDK/album_art.h>
 #include <foobar2000/SDK/library_manager.h>
 #include <foobar2000/SDK/contextmenu_manager.h>   // ← contextmenu.h から変更
+#include <foobar2000/SDK/console.h>   // ← 診断ログ出力用（v3.5.3診断ビルド）
 #include <libPPUI/win32_op.h>
 #include <helpers/BumpableElem.h>
 #include "columns_ui-sdk/ui_extension.h"
@@ -396,32 +397,90 @@ namespace {
     }
 
     // =======================================================
-    // ヘルパー関数：album_art_data を HBITMAP に変換
+    // 診断ログ出力ヘルパー（v3.5.3診断ビルドで導入。グレー表示バグ調査後は
+    // 通常利用時にコンソールを埋めてしまわないよう、実際の出力
+    // （console::print行）をコメントアウトして無効化してある。
+    // 再度トラブルシュートしたくなった際は、この2関数内の
+    // console::print(fmt); のコメントを外すだけで再度有効化できる）
+    // pfc::string_formatter() のような無名の一時オブジェクトに直接 << を
+    // 使うと「非定数の参照は左辺値へのみバインドされない」エラーになるため、
+    // 必ず名前付きのローカル変数を経由してから console::print() に渡す
     // =======================================================
-    HBITMAP DecodeArtToBitmap(album_art_data_ptr art)
+    static void DiagLog(const char* label, const char* msg)
     {
-        if (!art.is_valid()) return NULL;
+        pfc::string_formatter fmt;
+        fmt << "[Album Train diag] " << label << ": " << msg;
+        // console::print(fmt);  // ← 通常運用では無効化中。再有効化はこの行のコメントを外す
+        (void)fmt;  // 未使用警告の抑制
+    }
+
+    static void DiagLogNum(const char* label, const char* msg, long long value)
+    {
+        pfc::string_formatter fmt;
+        fmt << "[Album Train diag] " << label << ": " << msg << value;
+        // console::print(fmt);  // ← 通常運用では無効化中。再有効化はこの行のコメントを外す
+        (void)fmt;  // 未使用警告の抑制
+    }
+
+    // =======================================================
+    // ヘルパー関数：album_art_data を HBITMAP に変換
+    // v3.5.3診断ビルド：label（アルバム名など）を渡すと、WICデコードの
+    // どの段階で失敗したかをfoobar2000コンソールへ出力する
+    // =======================================================
+    HBITMAP DecodeArtToBitmap(album_art_data_ptr art, const char* label = nullptr)
+    {
+        if (!art.is_valid())
+        {
+            if (label) DiagLog(label, "art データが無効（is_valid()==false）");
+            return NULL;
+        }
+
+        if (label)
+        {
+            DiagLogNum(label, "埋め込み画像データサイズ(bytes) = ", (long long)art->get_size());
+        }
 
         IWICImagingFactory* pFactory = nullptr;
         HRESULT hr = CoCreateInstance(
             CLSID_WICImagingFactory, nullptr,
             CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pFactory));
-        if (FAILED(hr)) return NULL;
+        if (FAILED(hr))
+        {
+            if (label) DiagLogNum(label, "CoCreateInstance(WICImagingFactory) 失敗 HRESULT(10進)=", (long long)hr);
+            return NULL;
+        }
 
         IWICStream* pStream = nullptr;
         hr = pFactory->CreateStream(&pStream);
-        if (FAILED(hr)) { pFactory->Release(); return NULL; }
+        if (FAILED(hr))
+        {
+            if (label) DiagLogNum(label, "CreateStream 失敗 HRESULT(10進)=", (long long)hr);
+            pFactory->Release(); return NULL;
+        }
 
         hr = pStream->InitializeFromMemory(
             (BYTE*)art->get_ptr(), (DWORD)art->get_size());
-        if (FAILED(hr)) { pStream->Release(); pFactory->Release(); return NULL; }
+        if (FAILED(hr))
+        {
+            if (label) DiagLogNum(label, "InitializeFromMemory 失敗 HRESULT(10進)=", (long long)hr);
+            pStream->Release(); pFactory->Release(); return NULL;
+        }
 
         IWICBitmapDecoder* pDecoder = nullptr;
         hr = pFactory->CreateDecoderFromStream(
-            pStream, nullptr, WICDecodeMetadataCacheOnLoad, &pDecoder);
-        if (FAILED(hr)) { pStream->Release(); pFactory->Release(); return NULL; }
+            pStream, nullptr, WICDecodeMetadataCacheOnDemand, &pDecoder);
+        if (FAILED(hr))
+        {
+            if (label) DiagLogNum(label, "CreateDecoderFromStream 失敗（画像形式を認識できない可能性）HRESULT(10進)=", (long long)hr);
+            pStream->Release(); pFactory->Release(); return NULL;
+        }
 
         HBITMAP result = DecodeWICFrameToBitmap(pFactory, pDecoder);
+
+        if (label && !result)
+            DiagLog(label, "DecodeWICFrameToBitmap がNULLを返した（フレーム取得・変換段階で失敗）");
+        else if (label)
+            DiagLog(label, "デコード成功");
 
         pDecoder->Release();
         pStream->Release();
@@ -448,7 +507,7 @@ namespace {
 
         IWICBitmapDecoder* pDecoder = nullptr;
         hr = pFactory->CreateDecoderFromFilename(
-            wpath, nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &pDecoder);
+            wpath, nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &pDecoder);
         if (FAILED(hr)) { pFactory->Release(); return NULL; }
 
         HBITMAP result = DecodeWICFrameToBitmap(pFactory, pDecoder);
@@ -1185,7 +1244,14 @@ namespace {
                     album_art_data_ptr data;
                     hasArtwork = extractor->query(album_art_ids::cover_front, data, abort);
                 }
-                catch (...) {}
+                catch (const pfc::exception& ex) {
+                    pfc::string_formatter what_msg;
+                    what_msg << "有無確認パスで例外（pfc::exception）: " << ex.what();
+                    DiagLog(m_lib_albums[idx].album_name.c_str(), what_msg.c_str());
+                }
+                catch (...) {
+                    DiagLog(m_lib_albums[idx].album_name.c_str(), "有無確認パスで不明な例外");
+                }
 
                 // 有無確認済みの結果として記録しておく（次回以降は即座に判定できる）
                 ArtCacheEntry& checkEntry = m_art_cache[checkKey];
@@ -1363,9 +1429,16 @@ namespace {
                     album_art_data_ptr data;
                     hasArtwork = extractor->query(album_art_ids::cover_front, data, abort);
                     if (hasArtwork)
-                        hBitmap = DecodeArtToBitmap(data);
+                        hBitmap = DecodeArtToBitmap(data, e.album_name.c_str());
                 }
-                catch (...) {}
+                catch (const pfc::exception& ex) {
+                    pfc::string_formatter what_msg;
+                    what_msg << "デコードパスで例外（pfc::exception）: " << ex.what();
+                    DiagLog(e.album_name.c_str(), what_msg.c_str());
+                }
+                catch (...) {
+                    DiagLog(e.album_name.c_str(), "デコードパスで不明な例外");
+                }
 
                 ArtCacheEntry& entry = m_art_cache[key];
                 entry.checked = true;

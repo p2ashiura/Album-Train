@@ -2,7 +2,7 @@
 
 DECLARE_COMPONENT_VERSION(
     "Album Train",
-    "3.5.2",
+    "3.5.3",
     "Album Train component for foobar2000"
 );
 
