@@ -800,6 +800,7 @@ namespace {
 
             case WM_MOUSELEAVE:
                 m_mouseInWindow = false;
+                m_lastHoverEntry = nullptr;
                 if (m_hwnd) InvalidateRect(m_hwnd, NULL, FALSE);
                 return 0;
 
@@ -1524,42 +1525,10 @@ namespace {
             float max_dist = (float)width / 2.0f;
 
             // マウスオーバー枠表示のため、事前に「どのエントリの上に
-            // マウスがあるか」をHitTestAlbumと同様の考え方で判定しておく
-            // （重なっている場合は手前優先＝末尾から探して最初に見つかったもの）
+            // マウスがあるか」をFindHoverEntry()で判定しておく
             QueueEntry* hoverEntry = nullptr;
             if (g_cfg_show_hover_frame.get() && m_mouseInWindow)
-            {
-                for (auto it = m_queue.rbegin(); it != m_queue.rend(); ++it)
-                {
-                    auto& e = *it;
-                    float base_draw_x = e.x;
-                    if (base_draw_x + base_art_size < 0 || base_draw_x > width) continue;
-
-                    float scale = 1.0f;
-                    if (g_cfg_use_perspective.get())
-                    {
-                        float entry_center = base_draw_x + base_art_size / 2.0f;
-                        float dist = fabs(entry_center - center_x);
-                        float t = dist / max_dist;
-                        if (t > 1.0f) t = 1.0f;
-                        scale = 1.2f - t * 0.2f;
-                    }
-
-                    float art_size = base_art_size * scale;
-                    if (art_size < 10.0f) art_size = 10.0f;
-                    art_size = (float)((int)(art_size / 2.0f + 0.5f) * 2);
-
-                    float draw_x = base_draw_x + (base_art_size - art_size) / 2.0f;
-                    float draw_y_adj = draw_y + (max_art_size - art_size) / 2.0f;
-
-                    if ((float)m_mouseX >= draw_x && (float)m_mouseX <= draw_x + art_size &&
-                        (float)m_mouseY >= draw_y_adj && (float)m_mouseY <= draw_y_adj + art_size)
-                    {
-                        hoverEntry = &e;
-                        break;
-                    }
-                }
-            }
+                hoverEntry = FindHoverEntry(m_mouseX, m_mouseY);
 
             for (auto& entry : m_queue)
             {
@@ -1916,6 +1885,64 @@ namespace {
         }
 
         // =======================================================
+        // 現在のマウス座標から、ホバー対象のエントリを判定する
+        // （重なっている場合は手前優先＝末尾から探して最初に見つかったもの）
+        // OnPaint（描画用）とOnMouseMove（変化検知用）の両方から呼ばれる
+        // =======================================================
+        QueueEntry* FindHoverEntry(int mouseX, int mouseY)
+        {
+            if (m_queue.empty()) return nullptr;
+
+            RECT rc = GetClientRectHelper();
+            int width = rc.right - rc.left;
+            int height = rc.bottom - rc.top;
+
+            float base_art_size = (float)GetArtSize(rc);
+            const float max_scale = 1.2f;
+            float max_art_size = base_art_size * max_scale;
+
+            float textBlockHeight = (float)GetTextBlockHeight();
+            float content_height = max_art_size + textBlockHeight;
+
+            float draw_y = ((float)height - content_height) / 2.0f;
+            if (draw_y < 5.0f) draw_y = 5.0f;
+
+            float center_x = (float)width / 2.0f;
+            float max_dist = (float)width / 2.0f;
+
+            for (auto it = m_queue.rbegin(); it != m_queue.rend(); ++it)
+            {
+                auto& e = *it;
+                float base_draw_x = e.x;
+                if (base_draw_x + base_art_size < 0 || base_draw_x > width) continue;
+
+                float scale = 1.0f;
+                if (g_cfg_use_perspective.get())
+                {
+                    float entry_center = base_draw_x + base_art_size / 2.0f;
+                    float dist = fabs(entry_center - center_x);
+                    float t = dist / max_dist;
+                    if (t > 1.0f) t = 1.0f;
+                    scale = 1.2f - t * 0.2f;
+                }
+
+                float art_size = base_art_size * scale;
+                if (art_size < 10.0f) art_size = 10.0f;
+                art_size = (float)((int)(art_size / 2.0f + 0.5f) * 2);
+
+                float draw_x = base_draw_x + (base_art_size - art_size) / 2.0f;
+                float draw_y_adj = draw_y + (max_art_size - art_size) / 2.0f;
+
+                if ((float)mouseX >= draw_x && (float)mouseX <= draw_x + art_size &&
+                    (float)mouseY >= draw_y_adj && (float)mouseY <= draw_y_adj + art_size)
+                {
+                    return &e;
+                }
+            }
+            return nullptr;
+        }
+
+        // =======================================================
         // マウスオーバー枠表示のため、現在のマウス位置を記憶する
         // ウィンドウに入った直後にTrackMouseEventを呼び、ウィンドウから
         // 出た際にWM_MOUSELEAVEを受け取れるようにする
@@ -1935,7 +1962,21 @@ namespace {
             m_mouseX = x;
             m_mouseY = y;
 
-            if (m_hwnd) InvalidateRect(m_hwnd, NULL, FALSE);
+            // ホバー枠の再描画は、ホバー中のエントリが実際に切り替わった
+            // 時だけ行う。スクロールアニメーション自体は既にタイマーで
+            // 毎フレーム再描画されているため、マウスが動くたびに（ホバー
+            // 対象が変わっていなくても）無条件でInvalidateRectしていた
+            // 従来の実装は、その再描画に上乗せする形で過剰な再描画を
+            // 発生させ、流れが一瞬止まって見える原因になっていた。
+            if (g_cfg_show_hover_frame.get())
+            {
+                QueueEntry* newHover = FindHoverEntry(x, y);
+                if (newHover != m_lastHoverEntry)
+                {
+                    m_lastHoverEntry = newHover;
+                    if (m_hwnd) InvalidateRect(m_hwnd, NULL, FALSE);
+                }
+            }
         }
 
         // =======================================================
@@ -3198,6 +3239,9 @@ namespace {
         int                                     m_mouseX = -1;
         int                                     m_mouseY = -1;
         bool                                    m_mouseInWindow = false;
+        // 直近でホバー中と判定していたエントリ（変化検知用。再描画は
+        // これが変わった時だけ行う）
+        QueueEntry*                             m_lastHoverEntry = nullptr;
     };
      
     // Columns UI パネルとして登録
