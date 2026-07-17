@@ -283,6 +283,8 @@ v3.5.0: Added a hover highlight frame around artwork on mouse-over (follows Use 
         マウスオーバー時にアートワークへ枠を表示する機能を追加（Use Theme Coloursに統合、Stability Focusedモードでも常時有効）
 v3.5.1: Fixed a momentary stutter in the Album Train's scrolling while hovering the mouse (now only redraws when the hovered entry actually changes)
         マウスホバー使用時にアルバムトレインの流れが一瞬停止する現象を解消（ホバー対象が実際に切り替わった時だけ再描画するよう変更）
+v3.5.2: Fixed "Show Albums Without Artwork" not staying off after Apply/OK (a click handler that should have updated the staging value was missing)
+        「Show Albums Without Artwork」チェックボックスのオン/オフがApply/OK後も保持されなかった不具合を修正（クリック時にステージング領域へ反映するハンドラが欠落していたため）
 ```
 
 </details>

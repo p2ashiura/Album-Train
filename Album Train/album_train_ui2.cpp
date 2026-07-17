@@ -3024,16 +3024,16 @@ namespace {
                     if (ctx) ctx->staging.wheelScroll = (SendMessage(check, BM_GETCHECK, 0, 0) == BST_CHECKED);
                     return TRUE;
                 }
-                else if (LOWORD(wp) == IDC_SHOWNAME_CHECK)
-                {
-                    HWND check = GetDlgItem(hDlg, IDC_SHOWNAME_CHECK);
-                    if (ctx) ctx->staging.showAlbumName = (SendMessage(check, BM_GETCHECK, 0, 0) == BST_CHECKED);
-                    return TRUE;
-                }
                 else if (LOWORD(wp) == IDC_PERSPECTIVE_CHECK)
                 {
                     HWND check = GetDlgItem(hDlg, IDC_PERSPECTIVE_CHECK);
                     if (ctx) ctx->staging.perspective = (SendMessage(check, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                    return TRUE;
+                }
+                else if (LOWORD(wp) == IDC_SHOWNOART_CHECK)
+                {
+                    HWND check = GetDlgItem(hDlg, IDC_SHOWNOART_CHECK);
+                    if (ctx) ctx->staging.showNoArt = (SendMessage(check, BM_GETCHECK, 0, 0) == BST_CHECKED);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_DIR_LTR)
