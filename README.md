@@ -70,7 +70,7 @@ right-click → `Settings...`から、以下のグループで外観・挙動を
 |---|---|
 | **Mode** | Switch between Stability Focused (lightweight) and Customization Focused / Stability Focused（軽量・安定性重視）／ Customization Focused（カスタマイズ性重視）の切り替え |
 | **Theme** | Whether to follow Columns UI's theme colors / Columns UI のテーマ色に追従するかどうか |
-| **Artwork** | Display quality (High/Middle/Low), whether to show a highlight frame on mouse hover, perspective effect, whether to show albums without artwork, and its color or custom image / 表示品質（High/Middle/Low）、マウスホバー時の枠表示有無、遠近感演出、アートワーク未登録アルバムの表示有無、その色または任意画像 |
+| **Artwork** | Display quality (Ultra (Beta)/High/Middle/Low), whether to show a highlight frame on mouse hover, perspective effect, whether to show albums without artwork, and its color or custom image / 表示品質（Ultra (Beta)/High/Middle/Low）、マウスホバー時の枠表示有無、遠近感演出、アートワーク未登録アルバムの表示有無、その色または任意画像 |
 | **Scroll** | Scroll direction, scroll speed, whether mouse wheel scrolling is allowed / 流れる方向、スクロール速度、マウスホイール操作の許可 |
 | **Text** | Whether to show album name, font, color, display format (Title Formatting support), second line, fixed text position / アルバム名表示の有無、フォント、色、表示フォーマット（Title Formatting対応）、2行目表示、テキスト位置の固定 |
 | **Background** | Background color or custom image, and its display quality / 背景色または任意画像、その表示品質 |
@@ -107,6 +107,10 @@ A. While `Use Theme Colours` in the "Theme" group is on, colors automatically fo
 
 A. Only images tagged as `Front Cover` are displayed. If your embedded artwork is tagged as a different type (e.g. `Back Cover`, `Disc`, `Other`), it won't be picked up. Re-tagging the image as `Front Cover` should resolve this.
 
+**Q. What is "Ultra (Beta)" in Artwork Quality?**
+
+A. Experimental. The intended visual smoothness improvement has not been clearly noticeable in testing so far.
+
 **Q. Default UI（Columns UIを使わない標準UI）でも使えますか？**
 
 A. 現時点では Columns UI 専用です。Default UI には今後対応する予定です。
@@ -130,6 +134,10 @@ A. 「Theme」グループの `Use Theme Colours` がオンの間は、Columns U
 **Q. アートワークがあるはずなのに表示されません。**
 
 A. `Front Cover` として登録された画像のみを表示します。埋め込まれている画像が別の種別（`Back Cover`・`Disc`・`Other`など）として登録されている場合は表示されません。画像を `Front Cover` として登録し直すことで解決するはずです。
+
+**Q. Artwork Qualityの「Ultra (Beta)」とは何ですか？**
+
+A. 試験的機能です。狙いとしていた視覚的な滑らかさの向上が、体感できるほどには得られていません。
 
 ---
 
@@ -287,6 +295,8 @@ v3.5.2: Fixed "Show Albums Without Artwork" not staying off after Apply/OK (a cl
         「Show Albums Without Artwork」チェックボックスのオン/オフがApply/OK後も保持されなかった不具合を修正（クリック時にステージング領域へ反映するハンドラが欠落していたため）
 v3.5.3: Fixed albums with an embedded Front Cover sometimes showing grey (non-standard metadata in the image was causing WIC's metadata caching to fail the whole decode; switched to not loading metadata, which this component never used anyway)
         Front Coverが埋め込まれているのにグレー表示される不具合を修正（画像内の規格外メタデータがWICのメタデータキャッシュ読み込み時に巻き添えでデコード失敗を起こしていたため、メタデータを読み込まない方式に変更）
+v4.0.0: Added an experimental "Ultra (Beta)" Artwork Quality option using GDI+ high-quality interpolation and a pre-scaled cache, aimed at smoother perspective scaling. Also capped the decode resolution of embedded artwork (512px) to avoid heavy albums slowing things down
+        遠近感演出をより滑らかにする狙いで、GDI+高品質補間と事前縮小キャッシュを使った試験的な「Ultra (Beta)」品質を追加。あわせて、重いアルバムの原因になっていた埋め込みアートワークのデコード解像度上限（512px）を追加
 ```
 
 </details>
@@ -299,7 +309,7 @@ v3.5.3: Fixed albums with an embedded Front Cover sometimes showing grey (non-st
 - Dropdown-based font selection UI
 
 ### Performance / Architecture
-- Investigate a smoother rendering method for the perspective (scaling) effect (a permanent fix would require moving to a high-quality interpolation mode such as GDI+; deferred due to implementation scope)
+- Investigate a smoother rendering method for the perspective (scaling) effect (started in v4.0.0: tried GDI+ high-quality interpolation, removing 2px rounding, a higher-frequency timer, and a mipmap-like pre-scaled cache — none produced a dramatic improvement. The remaining jitter is likely an inherent limitation of per-frame independent resampling at continuously-changing sub-pixel positions, which a simple GDI/GDI+-based renderer can't easily fix structurally. A permanent fix would likely require a larger redesign of the rendering approach, e.g. hardware acceleration)
 
 ### Broader UI support
 - Support for foobar2000's Default UI
@@ -315,6 +325,7 @@ v3.5.3: Fixed albums with an embedded Front Cover sometimes showing grey (non-st
 - Font size range (tied to panel height)
 - Settings dialog design idea: swap the positions of the "Text" group (currently left column) and the "Background" group (currently right column)
 - Automatically reload the Album Train's contents when the monitored library folders change, without requiring a foobar2000 restart
+- Regarding the "Ultra (Beta)" Artwork Quality option: as of v4.0.0 it hasn't produced a clearly noticeable visual smoothness improvement. If further testing doesn't change that, consider removing it from the settings dialog
 
 ### Future ideas
 - Expanding the kinds of content that can be shown as a background, such as a visualizer
@@ -323,7 +334,7 @@ v3.5.3: Fixed albums with an embedded Front Cover sometimes showing grey (non-st
 - フォント選択UIのプルダウン化
 
 ### パフォーマンス・アーキテクチャ関連
-- 遠近感演出（拡大縮小）のさらなる滑らかな表示方式の検討（恒久対応にはGDI+等の高品質補間モードへの移行が必要と判明。実装規模が大きいため保留中）
+- 遠近感演出（拡大縮小）のさらなる滑らかな表示方式の検討（v4.0.0で着手。GDI+高品質補間・2px丸めの除去・タイマー間隔の高頻度化・ミップマップ的な事前縮小キャッシュを試したが、いずれも劇的な効果は得られず。残る振動は、位置（サブピクセル単位）の連続的な変化に対する、フレームごとに独立した再サンプリングそのものの限界である可能性が高く、GDI/GDI+ベースの単純な描画方式では構造的な対応が難しいと判断。恒久対応には描画方式自体の大規模な再設計（ハードウェアアクセラレーション対応等）が必要と考えられる）
 
 ### 対応UI拡大
 - foobar2000のDefault UIへの対応
@@ -339,6 +350,7 @@ v3.5.3: Fixed albums with an embedded Front Cover sometimes showing grey (non-st
 - フォントサイズ変更の許容範囲（パネル高さとの連動）
 - 設定ダイアログのデザイン案：現在左列にある「Text」グループと、右列にある「Background」グループの位置を左右入れ替える案
 - ライブラリの監視フォルダが変更された際、foobar2000の再起動を挟まなくてもアルバムトレインの表示内容を自動的に再読み込みする機能
+- Artwork Qualityの「Ultra (Beta)」について、v4.0.0時点では視覚的な滑らかさの向上が体感できるレベルには至っていない。今後さらに検証しても見込みが薄いようであれば、設定ダイアログの選択肢から外すことを検討する
 
 ### 将来構想
 - ヴィジュアライザーなど、背景に表示できるコンテンツの種類を増やす構想

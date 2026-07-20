@@ -39,7 +39,55 @@
 
 #include <commdlg.h>
 #pragma comment(lib, "comdlg32.lib")
+
+// GDI+ の内部実装がテンプレート引数として min/max を使うため、
+// windows.h由来のmin/maxマクロが定義されている場合は退避してから
+// 無効化しておく（v4.0.0：遠近感演出の高品質補間対応）
+#ifdef min
+#pragma push_macro("min")
+#undef min
+#define ALBUMTRAIN_RESTORE_MIN_MACRO
+#endif
+#ifdef max
+#pragma push_macro("max")
+#undef max
+#define ALBUMTRAIN_RESTORE_MAX_MACRO
+#endif
+
+#include <gdiplus.h>
+#pragma comment(lib, "gdiplus.lib")
+
+#ifdef ALBUMTRAIN_RESTORE_MIN_MACRO
+#pragma pop_macro("min")
+#undef ALBUMTRAIN_RESTORE_MIN_MACRO
+#endif
+#ifdef ALBUMTRAIN_RESTORE_MAX_MACRO
+#pragma pop_macro("max")
+#undef ALBUMTRAIN_RESTORE_MAX_MACRO
+#endif
+
 namespace {
+
+    // -------------------------------------------------------
+    // GDI+ の初期化・終了処理
+    // このコンポーネント（DLL）のロード時に構築され、アンロード時に
+    // 破棄される静的オブジェクトを使うことで、GdiplusStartup/Shutdown を
+    // 確実に対応付ける
+    // -------------------------------------------------------
+    struct GdiplusInitializer
+    {
+        ULONG_PTR token = 0;
+        GdiplusInitializer()
+        {
+            Gdiplus::GdiplusStartupInput input;
+            Gdiplus::GdiplusStartup(&token, &input, nullptr);
+        }
+        ~GdiplusInitializer()
+        {
+            Gdiplus::GdiplusShutdown(token);
+        }
+    };
+    static GdiplusInitializer g_gdiplus_init;
 
     // Columns UI パネル用の固有GUID
     static const GUID guid_albumtrain_cui =
@@ -374,6 +422,39 @@ namespace {
         UINT width = 0, height = 0;
         pConverter->GetSize(&width, &height);
 
+        // v4.0.0：埋め込みアートワークが数千px級の高解像度だと、毎フレームの
+        // 拡大縮小描画（特にUltra品質のGDI+高品質補間）が非常に重くなり、
+        // 「特定のアルバムだけ極端に重い」「Ultraでほぼフリーズする」の
+        // 原因になっていた。そのため、デコードの時点で妥当な上限サイズに
+        // 縮小しておく（パネル内での実際の表示サイズより十分大きい値に
+        // 設定してあるので、通常利用で画質が劣化することはないはず）
+        const UINT kMaxDecodedDim = 512;
+
+        IWICBitmapSource* pFinalSource = pConverter;
+        IWICBitmapScaler* pScaler = nullptr;
+
+        UINT longestSide = (width > height) ? width : height;
+        if (longestSide > kMaxDecodedDim)
+        {
+            double ratio = (double)kMaxDecodedDim / (double)longestSide;
+            UINT newWidth = (UINT)(width * ratio + 0.5);
+            UINT newHeight = (UINT)(height * ratio + 0.5);
+            if (newWidth < 1) newWidth = 1;
+            if (newHeight < 1) newHeight = 1;
+
+            HRESULT hrScale = pFactory->CreateBitmapScaler(&pScaler);
+            if (SUCCEEDED(hrScale))
+            {
+                hrScale = pScaler->Initialize(pConverter, newWidth, newHeight, WICBitmapInterpolationModeFant);
+                if (SUCCEEDED(hrScale))
+                {
+                    pFinalSource = pScaler;
+                    width = newWidth;
+                    height = newHeight;
+                }
+            }
+        }
+
         BITMAPINFO bmi = {};
         bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         bmi.bmiHeader.biWidth = (LONG)width;
@@ -389,8 +470,9 @@ namespace {
         ReleaseDC(NULL, hdcScreen);
 
         if (hBitmap && pBits)
-            pConverter->CopyPixels(nullptr, width * 4, width * height * 4, (BYTE*)pBits);
+            pFinalSource->CopyPixels(nullptr, width * 4, width * height * 4, (BYTE*)pBits);
 
+        if (pScaler) pScaler->Release();
         pConverter->Release();
         pFrame->Release();
         return hBitmap;
@@ -640,6 +722,21 @@ namespace {
             bool    hasArtwork = false;  // アートワークが実際に存在するか
             HBITMAP bitmap = NULL;       // デコード済みビットマップ（参照が無い間はNULL）
             int     refCount = 0;        // 現在キュー内から参照されている数
+
+            // v4.0.0：Artwork QualityがUltraの時のみ使う、GDI+高品質補間
+            // 描画用のラッパー。bitmap（HBITMAP）から初回描画時に1回だけ
+            // 生成し、bitmapと同じタイミングで解放する（毎フレーム
+            // HBITMAPをラップし直すコストを避けるためのキャッシュ）
+            Gdiplus::Bitmap* gdipBitmap = nullptr;
+
+            // v4.0.0（ミップマップ的方式）：gdipBitmap（最大512px）を、この
+            // パネルで実際に必要な最大表示サイズへあらかじめ1回だけ
+            // 高品質に縮小しておいたもの。毎フレームの最終リサイズ倍率を
+            // 1:1に近づけることで、連続的な拡縮によるリサンプリングの
+            // ちらつき（シマー）を減らす狙い。元画像がそもそも小さい場合は
+            // 生成せず、gdipBitmapをそのまま使う
+            Gdiplus::Bitmap* gdipBitmapPrescaled = nullptr;
+            float            gdipPrescaledForSize = 0.0f;  // 生成時のmax_art_size
         };
 
         // -------------------------------------------------------
@@ -823,7 +920,7 @@ namespace {
             case WM_CREATE:
                 m_hwnd = wnd;
                 BuildLibraryIndex();
-                SetTimer(wnd, TIMER_SCROLL, 30, NULL);
+                SetTimer(wnd, TIMER_SCROLL, 16, NULL);
                 SetTimer(wnd, TIMER_ARTWORK, 100, NULL);
                 return 0;
 
@@ -949,9 +1046,112 @@ namespace {
                         DeleteObject(it->second.bitmap);
                         it->second.bitmap = NULL;
                     }
+                    if (it->second.gdipBitmap)
+                    {
+                        delete it->second.gdipBitmap;
+                        it->second.gdipBitmap = nullptr;
+                    }
+                    if (it->second.gdipBitmapPrescaled)
+                    {
+                        delete it->second.gdipBitmapPrescaled;
+                        it->second.gdipBitmapPrescaled = nullptr;
+                    }
                 }
             }
             e.hBitmap = NULL;
+        }
+
+        // =======================================================
+        // 指定アルバムのHBITMAPに対応するGdiplus::Bitmapを取得する
+        // （Artwork QualityがUltraの時のみ使用。初回呼び出し時に1回だけ
+        // ラップして m_art_cache 側にキャッシュし、以降のフレームでは
+        // 使い回す。hBitmapが変わった場合は呼び出し側の解放処理
+        // （ReleaseQueueEntryArt等）で連動して破棄される）
+        // =======================================================
+        Gdiplus::Bitmap* GetOrCreateGdipBitmap(const pfc::string8& album_name, HBITMAP hBitmap)
+        {
+            if (!hBitmap) return nullptr;
+
+            std::string key(album_name.c_str());
+            auto it = m_art_cache.find(key);
+            if (it == m_art_cache.end()) return nullptr;
+
+            if (!it->second.gdipBitmap)
+                it->second.gdipBitmap = Gdiplus::Bitmap::FromHBITMAP(hBitmap, NULL);
+
+            return it->second.gdipBitmap;
+        }
+
+        // =======================================================
+        // v4.0.0（ミップマップ的方式）：GetOrCreateGdipBitmap()で得られる
+        // 元画像（最大512px）を、このパネルで実際に必要な最大表示サイズ
+        // （targetMaxSize＝max_art_size）へあらかじめ1回だけ高品質に
+        // 縮小しておいたものを返す。毎フレームの最終リサイズ倍率を1:1に
+        // 近づけることで、連続的な拡縮によるリサンプリングのちらつきを
+        // 減らす狙い。元画像がtargetMaxSize以下ならそのまま返す
+        // （引き伸ばしはしない）。targetMaxSizeが前回生成時から大きく
+        // 変わった場合（パネルリサイズ等）は作り直す
+        // =======================================================
+        Gdiplus::Bitmap* GetOrCreatePrescaledGdipBitmap(
+            const pfc::string8& album_name, HBITMAP hBitmap, float targetMaxSize)
+        {
+            Gdiplus::Bitmap* base = GetOrCreateGdipBitmap(album_name, hBitmap);
+            if (!base || base->GetLastStatus() != Gdiplus::Ok) return base;
+
+            std::string key(album_name.c_str());
+            auto it = m_art_cache.find(key);
+            if (it == m_art_cache.end()) return base;
+
+            bool needsRebuild = !it->second.gdipBitmapPrescaled ||
+                fabs(it->second.gdipPrescaledForSize - targetMaxSize) > 4.0f;
+
+            if (needsRebuild)
+            {
+                if (it->second.gdipBitmapPrescaled)
+                {
+                    delete it->second.gdipBitmapPrescaled;
+                    it->second.gdipBitmapPrescaled = nullptr;
+                }
+
+                UINT srcW = base->GetWidth();
+                UINT srcH = base->GetHeight();
+
+                if (srcW > 0 && srcH > 0 && targetMaxSize > 0.0f)
+                {
+                    UINT longest = (srcW > srcH) ? srcW : srcH;
+                    float ratio = targetMaxSize / (float)longest;
+
+                    // 元画像の方が既に小さい場合は、引き伸ばして作り直す
+                    // 必要はない（そのままbaseを使う）
+                    if (ratio < 1.0f)
+                    {
+                        UINT newW = (UINT)(srcW * ratio + 0.5f);
+                        UINT newH = (UINT)(srcH * ratio + 0.5f);
+                        if (newW < 1) newW = 1;
+                        if (newH < 1) newH = 1;
+
+                        Gdiplus::Bitmap* prescaled =
+                            new Gdiplus::Bitmap(newW, newH, PixelFormat32bppRGB);
+                        if (prescaled->GetLastStatus() == Gdiplus::Ok)
+                        {
+                            Gdiplus::Graphics g(prescaled);
+                            g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+                            g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+                            g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+                            g.DrawImage(base, 0.0f, 0.0f, (Gdiplus::REAL)newW, (Gdiplus::REAL)newH);
+                            it->second.gdipBitmapPrescaled = prescaled;
+                        }
+                        else
+                        {
+                            delete prescaled;
+                        }
+                    }
+                }
+
+                it->second.gdipPrescaledForSize = targetMaxSize;
+            }
+
+            return it->second.gdipBitmapPrescaled ? it->second.gdipBitmapPrescaled : base;
         }
 
         // =======================================================
@@ -966,7 +1166,11 @@ namespace {
             // 上記でほぼ全て解放されているはずだが、念のため残っている
             // ビットマップがあれば解放してからキャッシュ自体を破棄する
             for (auto& kv : m_art_cache)
+            {
                 if (kv.second.bitmap) DeleteObject(kv.second.bitmap);
+                if (kv.second.gdipBitmap) delete kv.second.gdipBitmap;
+                if (kv.second.gdipBitmapPrescaled) delete kv.second.gdipBitmapPrescaled;
+            }
             m_art_cache.clear();
 
             m_lib_albums.clear();
@@ -1034,6 +1238,10 @@ namespace {
                 {
                     if (it->second.bitmap)
                         DeleteObject(it->second.bitmap);
+                    if (it->second.gdipBitmap)
+                        delete it->second.gdipBitmap;
+                    if (it->second.gdipBitmapPrescaled)
+                        delete it->second.gdipBitmapPrescaled;
                     it = m_art_cache.erase(it);
                 }
                 else
@@ -1474,31 +1682,44 @@ namespace {
         }
 
         // =======================================================
+        // スクロール位置の更新（SetTimer(TIMER_SCROLL)から呼ばれる。
+        // v4.0.0でtimeSetEvent方式を試したが、メッセージキューの
+        // 詰まりによるアプリ全体の遅延を招いたため、SetTimerに戻した）
+        // =======================================================
+        void OnScrollTick()
+        {
+            if (!m_hwnd) return;
+            if (m_lib_albums.empty() || m_queue.empty()) return;
+
+            RECT rc = GetClientRectHelper();
+            int width = rc.right - rc.left;
+            if (width <= 0) return;
+
+            int spacing = GetSpacing(rc);
+
+            // 設定値（1～10）を実際のスクロール速度に変換
+            // 従来は30ms間隔で1段階あたり0.4px/フレームだったが、
+            // v4.0.0でタイマー間隔を16msに高頻度化したため、
+            // 体感速度（px/秒）を変えないよう比例して縮小する
+            float speed = (float)g_cfg_scroll_speed.get() * 0.4f * (16.0f / 30.0f);
+            if (!g_cfg_scroll_right_to_left.get()) speed = -speed;
+
+            for (auto& entry : m_queue)
+                entry.x -= speed;
+
+            ExtendQueue(spacing, width);
+
+            if (m_hwnd) InvalidateRect(m_hwnd, NULL, FALSE);
+        }
+
+        // =======================================================
         // タイマー処理
         // =======================================================
         void OnTimer(UINT_PTR id)
         {
             if (id == TIMER_SCROLL)
             {
-                if (m_lib_albums.empty() || m_queue.empty()) return;
-
-                RECT rc = GetClientRectHelper();
-                int width = rc.right - rc.left;
-                if (width <= 0) return;
-
-                int spacing = GetSpacing(rc);
-
-                // 設定値（1～10）を実際のスクロール速度に変換
-                // 1段階あたり0.4px/フレームの変化量とする
-                float speed = (float)g_cfg_scroll_speed.get() * 0.4f;
-                if (!g_cfg_scroll_right_to_left.get()) speed = -speed;
-
-                for (auto& entry : m_queue)
-                    entry.x -= speed;
-
-                ExtendQueue(spacing, width);
-
-                if (m_hwnd) InvalidateRect(m_hwnd, NULL, FALSE);
+                OnScrollTick();
             }
             else if (id == TIMER_ARTWORK)
             {
@@ -1525,8 +1746,10 @@ namespace {
             RECT fillRc = { 0, 0, width, height };
 
             // アートワーク表示品質（Stability Focusedモードでは強制的にLowにする）
+            // v4.0.0：Ultra（内部値3）はGDI+経路を使うが、万一取得に失敗した際の
+            // フォールバック用StretchBltモードとしてはHighと同じHALFTONEを使う
             int artworkQuality = g_cfg_stability_mode.get() ? 2 : (int)g_cfg_artwork_quality.get();
-            DWORD artworkStretchMode = (artworkQuality == 0) ? HALFTONE
+            DWORD artworkStretchMode = (artworkQuality == 0 || artworkQuality == 3) ? HALFTONE
                 : (artworkQuality == 1) ? COLORONCOLOR
                 : STRETCH_DELETESCANS;
 
@@ -1603,6 +1826,21 @@ namespace {
             if (g_cfg_show_hover_frame.get() && m_mouseInWindow)
                 hoverEntry = FindHoverEntry(m_mouseX, m_mouseY);
 
+            // v4.0.0：Artwork QualityがUltraの場合、Gdiplus::Graphicsを
+            // エントリごとに毎回作り直すと負荷が積み重なるため、
+            // このフレーム内で1回だけ生成して使い回す
+            // （Graphics(HDC)は内部にバッファを持たないラッパーのため、
+            // 同じbufDC上で他の通常のGDI描画と混在させても問題ない）
+            Gdiplus::Graphics* gdipGraphics = nullptr;
+            if (artworkQuality == 3)
+            {
+                gdipGraphics = new Gdiplus::Graphics(bufDC);
+                gdipGraphics->SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+                gdipGraphics->SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+                gdipGraphics->SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
+                gdipGraphics->SetSmoothingMode(Gdiplus::SmoothingModeNone);
+            }
+
             for (auto& entry : m_queue)
             {
                 float base_draw_x = entry.x;
@@ -1613,7 +1851,6 @@ namespace {
                 {
                     float entry_center = base_draw_x + base_art_size / 2.0f;
                     float dist = fabs(entry_center - center_x);
-
                     float t = dist / max_dist;
                     if (t > 1.0f) t = 1.0f;
                     scale = 1.2f - t * 0.2f;
@@ -1621,51 +1858,89 @@ namespace {
 
                 float art_size = base_art_size * scale;
                 if (art_size < 10.0f) art_size = 10.0f;
-                art_size = (float)((int)(art_size / 2.0f + 0.5f) * 2);
+
+                // v4.0.0：2px単位への丸めが「段階的な拡大縮小」に見える主因だった
+                // ため、Ultra品質の実描画だけはこの丸めをかけない連続値を使う。
+                // クリック判定・ホバー枠など見た目以外に関わる箇所は、従来通り
+                // 丸めた値（art_size）で統一し、挙動に影響を与えないようにする
+                float art_size_rounded = (float)((int)(art_size / 2.0f + 0.5f) * 2);
+                float art_size_for_draw = (artworkQuality == 3) ? art_size : art_size_rounded;
+                art_size = art_size_rounded;
 
                 float draw_x = base_draw_x + (base_art_size - art_size) / 2.0f;
                 float draw_y_adj = draw_y + (max_art_size - art_size) / 2.0f;
 
+                float draw_x_for_draw = base_draw_x + (base_art_size - art_size_for_draw) / 2.0f;
+                float draw_y_adj_for_draw = draw_y + (max_art_size - art_size_for_draw) / 2.0f;
+
                 if (entry.hBitmap)
                 {
-                    HDC memDC = CreateCompatibleDC(bufDC);
-                    HBITMAP hOld = (HBITMAP)SelectObject(memDC, entry.hBitmap);
-
                     BITMAP bm = {};
                     GetObject(entry.hBitmap, sizeof(bm), &bm);
 
                     if (bm.bmWidth <= 0 || bm.bmHeight <= 0)
                     {
-                        SelectObject(memDC, hOld);
-                        DeleteDC(memDC);
                         continue;
                     }
 
                     float dst_w, dst_h;
                     if (bm.bmWidth >= bm.bmHeight)
                     {
-                        dst_w = art_size;
-                        dst_h = art_size * (float)bm.bmHeight / (float)bm.bmWidth;
+                        dst_w = art_size_for_draw;
+                        dst_h = art_size_for_draw * (float)bm.bmHeight / (float)bm.bmWidth;
                     }
                     else
                     {
-                        dst_h = art_size;
-                        dst_w = art_size * (float)bm.bmWidth / (float)bm.bmHeight;
+                        dst_h = art_size_for_draw;
+                        dst_w = art_size_for_draw * (float)bm.bmWidth / (float)bm.bmHeight;
                     }
 
-                    float dst_x = draw_x + (art_size - dst_w) / 2.0f;
-                    float dst_y = draw_y_adj + (art_size - dst_h) / 2.0f;
+                    float dst_x = draw_x_for_draw + (art_size_for_draw - dst_w) / 2.0f;
+                    float dst_y = draw_y_adj_for_draw + (art_size_for_draw - dst_h) / 2.0f;
 
-                    SetStretchBltMode(bufDC, artworkStretchMode);
-                    SetBrushOrgEx(bufDC, 0, 0, NULL);
+                    // v4.0.0：Artwork QualityがUltraの時のみ、GDI+の高品質補間
+                    // （HighQualityBicubic）で描画する。遠近感演出中の連続的な
+                    // サイズ変化でも輪郭がガクつかず滑らかに見えるようにするため。
+                    // High/Middle/Lowは従来通りGDI（StretchBlt）のまま
+                    bool drawnWithGdiplus = false;
+                    if (artworkQuality == 3 && gdipGraphics)
+                    {
+                        // v4.0.0（ミップマップ的方式）：このパネルで実際に必要な
+                        // 最大表示サイズ（max_art_size）へあらかじめ縮小済みの
+                        // ものを使うことで、毎フレームの最終リサイズ倍率を
+                        // 1:1に近づける。ソース矩形は、そのビットマップ自身の
+                        // 実際の寸法（元画像のbm.bmWidth/bmHeightとは異なる
+                        // 場合がある）を使う
+                        Gdiplus::Bitmap* gdipBmp = GetOrCreatePrescaledGdipBitmap(
+                            entry.album_name, entry.hBitmap, max_art_size);
+                        if (gdipBmp && gdipBmp->GetLastStatus() == Gdiplus::Ok)
+                        {
+                            gdipGraphics->DrawImage(gdipBmp,
+                                Gdiplus::RectF(dst_x, dst_y, dst_w, dst_h),
+                                0.0f, 0.0f,
+                                (Gdiplus::REAL)gdipBmp->GetWidth(), (Gdiplus::REAL)gdipBmp->GetHeight(),
+                                Gdiplus::UnitPixel);
+                            drawnWithGdiplus = true;
+                        }
+                    }
 
-                    StretchBlt(bufDC,
-                        (int)(dst_x + 0.5f), (int)(dst_y + 0.5f),
-                        (int)(dst_w + 0.5f), (int)(dst_h + 0.5f),
-                        memDC, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+                    if (!drawnWithGdiplus)
+                    {
+                        // 従来のGDI経路（Middle/Low、またはGDI+側の取得に失敗した場合のフォールバック）
+                        HDC memDC = CreateCompatibleDC(bufDC);
+                        HBITMAP hOld = (HBITMAP)SelectObject(memDC, entry.hBitmap);
 
-                    SelectObject(memDC, hOld);
-                    DeleteDC(memDC);
+                        SetStretchBltMode(bufDC, artworkStretchMode);
+                        SetBrushOrgEx(bufDC, 0, 0, NULL);
+
+                        StretchBlt(bufDC,
+                            (int)(dst_x + 0.5f), (int)(dst_y + 0.5f),
+                            (int)(dst_w + 0.5f), (int)(dst_h + 0.5f),
+                            memDC, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+
+                        SelectObject(memDC, hOld);
+                        DeleteDC(memDC);
+                    }
                 }
                 else
                 {
@@ -1690,11 +1965,20 @@ namespace {
                 }
 
                 // マウスオーバー枠：アートワークのみを縁取る（固定2px）
+                // v4.0.0：Ultra品質の時は、アートワーク本体と同じ連続値
+                // （draw_x_for_draw / art_size_for_draw）を使う。丸めた値の
+                // ままだと、枠だけが2pxずつ段階的に動き、滑らかに動く
+                // アートワーク本体との間にズレが生じ、「枠をはみ出すように
+                // 振動する」ように見えてしまうため
                 if (hoverEntry == &entry)
                 {
+                    float frame_x = (artworkQuality == 3) ? draw_x_for_draw : draw_x;
+                    float frame_y = (artworkQuality == 3) ? draw_y_adj_for_draw : draw_y_adj;
+                    float frame_size = (artworkQuality == 3) ? art_size_for_draw : art_size;
+
                     RECT frameRc = {
-                        (int)(draw_x + 0.5f), (int)(draw_y_adj + 0.5f),
-                        (int)(draw_x + art_size + 0.5f), (int)(draw_y_adj + art_size + 0.5f)
+                        (int)(frame_x + 0.5f), (int)(frame_y + 0.5f),
+                        (int)(frame_x + frame_size + 0.5f), (int)(frame_y + frame_size + 0.5f)
                     };
 
                     HPEN framePen = CreatePen(PS_SOLID, 2, GetHoverFrameColor());
@@ -1748,6 +2032,9 @@ namespace {
                     }
                 }
             }
+
+            if (gdipGraphics)
+                delete gdipGraphics;
 
            if (hOldFont)
                 SelectObject(bufDC, hOldFont);
@@ -2375,10 +2662,30 @@ namespace {
                     WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
                     CONTENT_X + 110, naY, CONTENT_W - 110, rowH * 5, hDlg, (HMENU)(INT_PTR)IDC_ARTWORK_QUALITY_COMBO,
                     NULL, NULL);
+                // v4.0.0：Ultra（GDI+高品質補間）を追加。既存設定との互換性を保つため、
+                // 内部値（cfg保存値）はHigh=0/Middle=1/Low=2のまま変更せず、
+                // 新設のUltraには4番目の値=3を割り当てる。表示順序（Ultraが先頭）と
+                // 内部値の並びが一致しないため、CB_SETITEMDATAで表示位置↔内部値を
+                // 対応付ける
+                SendMessage(artworkQualityCombo, CB_ADDSTRING, 0, (LPARAM)_T("Ultra (Beta)"));
                 SendMessage(artworkQualityCombo, CB_ADDSTRING, 0, (LPARAM)_T("High"));
                 SendMessage(artworkQualityCombo, CB_ADDSTRING, 0, (LPARAM)_T("Middle"));
                 SendMessage(artworkQualityCombo, CB_ADDSTRING, 0, (LPARAM)_T("Low"));
-                SendMessage(artworkQualityCombo, CB_SETCURSEL, ctx->staging.artworkQuality, 0);
+                SendMessage(artworkQualityCombo, CB_SETITEMDATA, 0, (LPARAM)3);  // Ultra → 内部値3
+                SendMessage(artworkQualityCombo, CB_SETITEMDATA, 1, (LPARAM)0);  // High  → 内部値0
+                SendMessage(artworkQualityCombo, CB_SETITEMDATA, 2, (LPARAM)1);  // Middle→ 内部値1
+                SendMessage(artworkQualityCombo, CB_SETITEMDATA, 3, (LPARAM)2);  // Low   → 内部値2
+                {
+                    int initialIndex = 1; // 既定はHighの表示位置
+                    switch (ctx->staging.artworkQuality)
+                    {
+                    case 3: initialIndex = 0; break; // Ultra
+                    case 0: initialIndex = 1; break; // High
+                    case 1: initialIndex = 2; break; // Middle
+                    case 2: initialIndex = 3; break; // Low
+                    }
+                    SendMessage(artworkQualityCombo, CB_SETCURSEL, initialIndex, 0);
+                }
                 EnableWindow(artworkQualityCombo, !ctx->staging.stabilityMode);
                 naY += rowH;
 
@@ -2911,7 +3218,8 @@ namespace {
                 {
                     HWND combo = GetDlgItem(hDlg, IDC_ARTWORK_QUALITY_COMBO);
                     int idx = (int)SendMessage(combo, CB_GETCURSEL, 0, 0);
-                    if (ctx) ctx->staging.artworkQuality = idx;
+                    int value = (int)SendMessage(combo, CB_GETITEMDATA, idx, 0);
+                    if (ctx) ctx->staging.artworkQuality = value;
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_NOART_MODE_IMAGE)
@@ -3137,7 +3445,7 @@ namespace {
                     if (ctx) ctx->staging.showNoArt = true;
 
                     HWND qualityCombo = GetDlgItem(hDlg, IDC_ARTWORK_QUALITY_COMBO);
-                    SendMessage(qualityCombo, CB_SETCURSEL, 2, 0);  // Low
+                    SendMessage(qualityCombo, CB_SETCURSEL, 3, 0);  // Low（表示順4番目＝内部値2）
                     EnableWindow(qualityCombo, FALSE);
                     if (ctx) ctx->staging.artworkQuality = 2;  // Low
 
@@ -3287,6 +3595,7 @@ namespace {
         // メンバ変数
         // -------------------------------------------------------
         HWND                                 m_hwnd = NULL;
+
         metadb_handle_ptr                    m_current_track;
         std::vector<LibAlbum>                m_lib_albums;
         std::map<std::string, ArtCacheEntry> m_art_cache;
