@@ -70,7 +70,7 @@ right-click → `Settings...`から、以下のグループで外観・挙動を
 |---|---|
 | **Mode** | Switch between Stability Focused (lightweight) and Customization Focused / Stability Focused（軽量・安定性重視）／ Customization Focused（カスタマイズ性重視）の切り替え |
 | **Theme** | Whether to follow Columns UI's theme colors / Columns UI のテーマ色に追従するかどうか |
-| **Artwork** | Display quality (Ultra (Beta)/High/Middle/Low), whether to show a highlight frame on mouse hover, perspective effect, whether to show albums without artwork, and its color or custom image / 表示品質（Ultra (Beta)/High/Middle/Low）、マウスホバー時の枠表示有無、遠近感演出、アートワーク未登録アルバムの表示有無、その色または任意画像 |
+| **Artwork** | Display quality (Ultra (Beta)/High/Middle/Low), Hardware Acceleration (NVIDIA GPU only), whether to show a highlight frame on mouse hover, perspective effect, whether to show albums without artwork, and its color or custom image / 表示品質（Ultra (Beta)/High/Middle/Low）、Hardware Acceleration（NVIDIA製GPU限定）、マウスホバー時の枠表示有無、遠近感演出、アートワーク未登録アルバムの表示有無、その色または任意画像 |
 | **Scroll** | Scroll direction, scroll speed, whether mouse wheel scrolling is allowed / 流れる方向、スクロール速度、マウスホイール操作の許可 |
 | **Text** | Whether to show album name, font, color, display format (Title Formatting support), second line, fixed text position / アルバム名表示の有無、フォント、色、表示フォーマット（Title Formatting対応）、2行目表示、テキスト位置の固定 |
 | **Background** | Background color or custom image, and its display quality / 背景色または任意画像、その表示品質 |
@@ -78,6 +78,10 @@ right-click → `Settings...`から、以下のグループで外観・挙動を
 Selecting Stability Focused mode automatically forces "show albums without artwork" on and locks display quality to Low (a safety measure to reduce load).
 
 Stability Focused モードを選択すると、アートワーク未登録アルバムを常に表示する設定と、表示品質が自動的に Low に固定されます（負荷を軽減するための安全対策です）。
+
+If your system has an NVIDIA GPU, you can turn on "Hardware Acceleration" in the "Artwork" group. This renders album artwork via Direct2D instead of GDI/GDI+, and noticeably reduces the jitter that can appear during the perspective (scaling) effect. It's detected automatically and stays greyed out on other hardware. While it's on, the "Artwork Quality" dropdown has no effect and is greyed out.
+
+お使いの環境がNVIDIA製GPUの場合、「Artwork」グループの「Hardware Acceleration」をオンにできます。遠近感演出（拡大縮小）中に発生する振動が体感できるレベルで軽減されます。GPUは自動検出され、それ以外の環境ではグレーアウトしたままになります。オンの間は「Artwork Quality」の選択はグレーアウトされます。
 
 ---
 
@@ -111,6 +115,10 @@ A. Only images tagged as `Front Cover` are displayed. If your embedded artwork i
 
 A. Experimental. The intended visual smoothness improvement has not been clearly noticeable in testing so far.
 
+**Q. Hardware Acceleration is greyed out and I can't turn it on.**
+
+A. It's only available on systems with an NVIDIA GPU, detected automatically. It stays disabled on other hardware.
+
 **Q. Default UI（Columns UIを使わない標準UI）でも使えますか？**
 
 A. 現時点では Columns UI 専用です。Default UI には今後対応する予定です。
@@ -138,6 +146,10 @@ A. `Front Cover` として登録された画像のみを表示します。埋め
 **Q. Artwork Qualityの「Ultra (Beta)」とは何ですか？**
 
 A. 試験的機能です。狙いとしていた視覚的な滑らかさの向上が、体感できるほどには得られていません。
+
+**Q. Hardware Accelerationがグレーアウトしていてオンにできません。**
+
+A. NVIDIA製GPUを搭載した環境でのみ自動検出され、有効化できる機能です。それ以外の環境では無効のままとなります。
 
 ---
 
@@ -297,6 +309,8 @@ v3.5.3: Fixed albums with an embedded Front Cover sometimes showing grey (non-st
         Front Coverが埋め込まれているのにグレー表示される不具合を修正（画像内の規格外メタデータがWICのメタデータキャッシュ読み込み時に巻き添えでデコード失敗を起こしていたため、メタデータを読み込まない方式に変更）
 v4.0.0: Added an experimental "Ultra (Beta)" Artwork Quality option using GDI+ high-quality interpolation and a pre-scaled cache, aimed at smoother perspective scaling. Also capped the decode resolution of embedded artwork (512px) to avoid heavy albums slowing things down
         遠近感演出をより滑らかにする狙いで、GDI+高品質補間と事前縮小キャッシュを使った試験的な「Ultra (Beta)」品質を追加。あわせて、重いアルバムの原因になっていた埋め込みアートワークのデコード解像度上限（512px）を追加
+v4.1.0: Added Hardware Acceleration (NVIDIA GPU only), rendering artwork via Direct2D (GDI interop, ID2D1DCRenderTarget) instead of GDI/GDI+, noticeably reducing jitter during the perspective effect. Greys out Artwork Quality while enabled. Also unified the hover-frame drawing precision with the active rendering engine (D2D/GDI+/GDI), fixing a frame-only jitter that had been present under Ultra quality
+        Hardware Acceleration（NVIDIA製GPU限定）を追加。GDI相互運用のDirect2D（ID2D1DCRenderTarget）でアートワークを描画するようになり、遠近感演出時の振動が体感できるレベルで軽減。有効時はArtwork Qualityをグレーアウト。あわせて、マウスオーバー枠の描画精度を実際に使われている描画エンジン（D2D／GDI+／GDI）に合わせて統一し、Ultra品質でのみ発生していた枠だけの振動を修正
 ```
 
 </details>
@@ -309,7 +323,7 @@ v4.0.0: Added an experimental "Ultra (Beta)" Artwork Quality option using GDI+ h
 - Dropdown-based font selection UI
 
 ### Performance / Architecture
-- Investigate a smoother rendering method for the perspective (scaling) effect (started in v4.0.0: tried GDI+ high-quality interpolation, removing 2px rounding, a higher-frequency timer, and a mipmap-like pre-scaled cache — none produced a dramatic improvement. The remaining jitter is likely an inherent limitation of per-frame independent resampling at continuously-changing sub-pixel positions, which a simple GDI/GDI+-based renderer can't easily fix structurally. A permanent fix would likely require a larger redesign of the rendering approach, e.g. hardware acceleration)
+- Investigate a smoother rendering method for the perspective (scaling) effect (started in v4.0.0: tried GDI+ high-quality interpolation, removing 2px rounding, a higher-frequency timer, and a mipmap-like pre-scaled cache — none produced a dramatic improvement. The remaining jitter is likely an inherent limitation of per-frame independent resampling at continuously-changing sub-pixel positions, which a simple GDI/GDI+-based renderer can't easily fix structurally. Addressed in v4.1.0 with Hardware Acceleration (NVIDIA GPU only) via Direct2D GDI interop, which noticeably reduced the jitter. Its interpolation is limited to Linear/Nearest, though, so achieving Ultra-level or better interpolation quality would require a further move to a full `ID2D1DeviceContext`/Direct3D 11 setup)
 
 ### Broader UI support
 - Support for foobar2000's Default UI
@@ -326,6 +340,7 @@ v4.0.0: Added an experimental "Ultra (Beta)" Artwork Quality option using GDI+ h
 - Settings dialog design idea: swap the positions of the "Text" group (currently left column) and the "Background" group (currently right column)
 - Automatically reload the Album Train's contents when the monitored library folders change, without requiring a foobar2000 restart
 - Regarding the "Ultra (Beta)" Artwork Quality option: as of v4.0.0 it hasn't produced a clearly noticeable visual smoothness improvement. If further testing doesn't change that, consider removing it from the settings dialog
+- Expand Hardware Acceleration (v4.1.0) to cover more than just artwork (e.g. the background image), which currently isn't rendered via Direct2D
 
 ### Future ideas
 - Expanding the kinds of content that can be shown as a background, such as a visualizer
@@ -334,7 +349,7 @@ v4.0.0: Added an experimental "Ultra (Beta)" Artwork Quality option using GDI+ h
 - フォント選択UIのプルダウン化
 
 ### パフォーマンス・アーキテクチャ関連
-- 遠近感演出（拡大縮小）のさらなる滑らかな表示方式の検討（v4.0.0で着手。GDI+高品質補間・2px丸めの除去・タイマー間隔の高頻度化・ミップマップ的な事前縮小キャッシュを試したが、いずれも劇的な効果は得られず。残る振動は、位置（サブピクセル単位）の連続的な変化に対する、フレームごとに独立した再サンプリングそのものの限界である可能性が高く、GDI/GDI+ベースの単純な描画方式では構造的な対応が難しいと判断。恒久対応には描画方式自体の大規模な再設計（ハードウェアアクセラレーション対応等）が必要と考えられる）
+- 遠近感演出（拡大縮小）のさらなる滑らかな表示方式の検討（v4.0.0で着手。GDI+高品質補間・2px丸めの除去・タイマー間隔の高頻度化・ミップマップ的な事前縮小キャッシュを試したが、いずれも劇的な効果は得られず。残る振動は、位置（サブピクセル単位）の連続的な変化に対する、フレームごとに独立した再サンプリングそのものの限界である可能性が高く、GDI/GDI+ベースの単純な描画方式では構造的な対応が難しいと判断。v4.1.0にて、Direct2D（GDI相互運用）によるHardware Acceleration（NVIDIA製GPU限定）で対応し、体感できるレベルで振動を軽減。ただし補間モードがLinear/Nearestに限定されるため、Ultra以上の補間品質が必要になった場合は、`ID2D1DeviceContext`／Direct3D 11によるフル構成への移行が別途必要）
 
 ### 対応UI拡大
 - foobar2000のDefault UIへの対応
@@ -351,6 +366,7 @@ v4.0.0: Added an experimental "Ultra (Beta)" Artwork Quality option using GDI+ h
 - 設定ダイアログのデザイン案：現在左列にある「Text」グループと、右列にある「Background」グループの位置を左右入れ替える案
 - ライブラリの監視フォルダが変更された際、foobar2000の再起動を挟まなくてもアルバムトレインの表示内容を自動的に再読み込みする機能
 - Artwork Qualityの「Ultra (Beta)」について、v4.0.0時点では視覚的な滑らかさの向上が体感できるレベルには至っていない。今後さらに検証しても見込みが薄いようであれば、設定ダイアログの選択肢から外すことを検討する
+- Hardware Acceleration（v4.1.0）の適用範囲拡大。現状はアートワーク本体のみDirect2D描画で、背景画像等は対象外
 
 ### 将来構想
 - ヴィジュアライザーなど、背景に表示できるコンテンツの種類を増やす構想

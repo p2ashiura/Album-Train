@@ -40,6 +40,18 @@
 #include <commdlg.h>
 #pragma comment(lib, "comdlg32.lib")
 
+// v4.1.0：ハードウェアアクセラレーション対応のGPU検出（NVIDIA製かどうかの
+// 判定）に使う。DXGIのアダプター列挙にはDirect3D自体は不要
+#include <dxgi.h>
+#pragma comment(lib, "dxgi.lib")
+
+// v4.1.0：ハードウェアアクセラレーション対応（アートワーク描画の
+// Direct2D化）に使う。GDI相互運用のID2D1DCRenderTargetを使うことで、
+// 既存のオフスクリーンDC（bufDC）に対してBeginDraw/EndDrawで
+// 割り込む形で使え、周辺のGDI描画コードには手を入れずに済む
+#include <d2d1.h>
+#pragma comment(lib, "d2d1.lib")
+
 // GDI+ の内部実装がテンプレート引数として min/max を使うため、
 // windows.h由来のmin/maxマクロが定義されている場合は退避してから
 // 無効化しておく（v4.0.0：遠近感演出の高品質補間対応）
@@ -141,6 +153,7 @@ namespace {
     static const int IDC_HOVER_FRAME_CHECK = 1041;
     static const int IDC_HOVER_FRAME_COLOR_BTN = 1042;
     static const int IDC_HOVER_FRAME_COLOR_SWATCH = 1043;
+    static const int IDC_HWACCEL_CHECK = 1044;
 
     // -------------------------------------------------------
     // 設定項目：スクロール速度（1～10段階、初期値5）
@@ -327,6 +340,17 @@ namespace {
     static const GUID guid_cfg_hover_frame_color =
     { 0x9dace013, 0x68df, 0x2457,{0x9b,0x35,0x7e,0xc0,0x13,0x57,0x9b,0xdf} };
     static cfg_struct_t<COLORREF> g_cfg_hover_frame_color(guid_cfg_hover_frame_color, RGB(255, 255, 255));
+
+    // -------------------------------------------------------
+    // 設定項目：ハードウェアアクセラレーション（Direct2D経由の描画）を
+    // 使うか（true=有効）。NVIDIA製GPUが検出された環境でのみ、設定
+    // ダイアログ側でオンにできる（v4.1.0：土台部分のみ。実際のD2D
+    // 描画切り替えは次のステップで実装予定）
+    // -------------------------------------------------------
+    static const GUID guid_cfg_hw_accel =
+    { 0x9eace013, 0x68df, 0x2457,{0x9b,0x35,0x7e,0xc0,0x13,0x57,0x9b,0xdf} };
+
+    static cfg_bool g_cfg_hw_accel(guid_cfg_hw_accel, false);
 
     // -------------------------------------------------------
     // 設定項目：流れる方向（true=右から左、false=左から右）
@@ -632,6 +656,46 @@ namespace {
         SelectObject(memDC, hOld);
         DeleteDC(memDC);
     }
+
+    // =======================================================
+    // v4.1.0：NVIDIA製GPUが利用可能かどうかを検出する
+    // DXGIのアダプター列挙を使い、いずれかのアダプターのベンダーIDが
+    // NVIDIA（0x10DE）であればtrueを返す。列挙結果はプロセス内で
+    // 1回だけ計算し、以降はキャッシュを返す（設定ダイアログを開く
+    // たびに毎回列挙し直す必要はないため）
+    // =======================================================
+    bool IsNvidiaGpuAvailable()
+    {
+        static bool checked = false;
+        static bool result = false;
+
+        if (checked) return result;
+        checked = true;
+
+        IDXGIFactory* factory = nullptr;
+        if (FAILED(CreateDXGIFactory(__uuidof(IDXGIFactory), (void**)&factory)))
+            return result;
+
+        IDXGIAdapter* adapter = nullptr;
+        for (UINT i = 0; factory->EnumAdapters(i, &adapter) != DXGI_ERROR_NOT_FOUND; i++)
+        {
+            DXGI_ADAPTER_DESC desc = {};
+            if (SUCCEEDED(adapter->GetDesc(&desc)))
+            {
+                // 0x10DE = NVIDIA Corporation のPCIベンダーID
+                if (desc.VendorId == 0x10DE)
+                {
+                    result = true;
+                    adapter->Release();
+                    break;
+                }
+            }
+            adapter->Release();
+        }
+
+        factory->Release();
+        return result;
+    }
        
     // =======================================================
     // 色プレビュー（スウォッチ）用のサブクラスプロシージャ
@@ -737,6 +801,11 @@ namespace {
             // 生成せず、gdipBitmapをそのまま使う
             Gdiplus::Bitmap* gdipBitmapPrescaled = nullptr;
             float            gdipPrescaledForSize = 0.0f;  // 生成時のmax_art_size
+
+            // v4.1.0：Hardware Acceleration用。bitmap（HBITMAP）から
+            // 初回描画時に1回だけ生成するID2D1Bitmap。bitmapと同じ
+            // タイミングで解放する
+            ID2D1Bitmap* d2dBitmap = nullptr;
         };
 
         // -------------------------------------------------------
@@ -769,6 +838,7 @@ namespace {
             bool     fixTextPosition = false;
             bool     showHoverFrame = true;
             COLORREF hoverFrameColor = RGB(255, 255, 255);
+            bool     hwAccel = false;
         };
 
         struct SettingsDialogContext
@@ -833,6 +903,8 @@ namespace {
             if (m_bgImageBitmap) DeleteObject(m_bgImageBitmap);
             if (m_noArtImageBitmap) DeleteObject(m_noArtImageBitmap);
             ClearAll();
+            ReleaseD2DResources();
+            if (m_d2dFactory) { m_d2dFactory->Release(); m_d2dFactory = nullptr; }
         }
 
         // -------------------------------------------------------
@@ -1056,6 +1128,11 @@ namespace {
                         delete it->second.gdipBitmapPrescaled;
                         it->second.gdipBitmapPrescaled = nullptr;
                     }
+                    if (it->second.d2dBitmap)
+                    {
+                        it->second.d2dBitmap->Release();
+                        it->second.d2dBitmap = nullptr;
+                    }
                 }
             }
             e.hBitmap = NULL;
@@ -1155,8 +1232,117 @@ namespace {
         }
 
         // =======================================================
-        // 全データを解放する
+        // v4.1.0：Hardware Acceleration用のD2Dリソース（ファクトリと、
+        // GDI相互運用のDCレンダーターゲット）を必要になった時点で
+        // 1回だけ生成する。生成済みならすぐtrueを返す。
+        // 生成に失敗した場合（ドライバ側の問題等）は、以降フレーム毎に
+        // 再試行はせず、そのセッション中は諦めてGDI/GDI+側にフォールバック
+        // する（m_d2dInitFailedで記録）
         // =======================================================
+        bool EnsureD2DResources()
+        {
+            if (m_d2dDCRT) return true;
+            if (m_d2dInitFailed) return false;
+
+            if (!m_d2dFactory)
+            {
+                HRESULT hr = D2D1CreateFactory(
+                    D2D1_FACTORY_TYPE_SINGLE_THREADED, &m_d2dFactory);
+                if (FAILED(hr) || !m_d2dFactory)
+                {
+                    m_d2dFactory = nullptr;
+                    m_d2dInitFailed = true;
+                    return false;
+                }
+            }
+
+            // アートワークは埋め込み画像をそのままDIBセクション化した
+            // 32bppBGR（アルファ無し）なので、ピクセルフォーマットは
+            // それに合わせてD2D1_ALPHA_MODE_IGNOREにしておく
+            D2D1_RENDER_TARGET_PROPERTIES rtProps = {};
+            rtProps.type = D2D1_RENDER_TARGET_TYPE_HARDWARE;
+            rtProps.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            rtProps.pixelFormat.alphaMode = D2D1_ALPHA_MODE_IGNORE;
+            rtProps.dpiX = 0.0f;
+            rtProps.dpiY = 0.0f;
+            rtProps.usage = D2D1_RENDER_TARGET_USAGE_NONE;
+            rtProps.minLevel = D2D1_FEATURE_LEVEL_DEFAULT;
+
+            HRESULT hr = m_d2dFactory->CreateDCRenderTarget(&rtProps, &m_d2dDCRT);
+            if (FAILED(hr) || !m_d2dDCRT)
+            {
+                m_d2dDCRT = nullptr;
+                m_d2dInitFailed = true;
+                return false;
+            }
+
+            return true;
+        }
+
+        // =======================================================
+        // v4.1.0：デバイスロスト等でD2Dリソースが無効になった際に、
+        // レンダーターゲットとそれに紐づくビットマップキャッシュを
+        // すべて破棄する。次回描画時にEnsureD2DResources()から作り直す
+        // =======================================================
+        void ReleaseD2DResources()
+        {
+            for (auto& kv : m_art_cache)
+            {
+                if (kv.second.d2dBitmap)
+                {
+                    kv.second.d2dBitmap->Release();
+                    kv.second.d2dBitmap = nullptr;
+                }
+            }
+
+            if (m_d2dDCRT)
+            {
+                m_d2dDCRT->Release();
+                m_d2dDCRT = nullptr;
+            }
+        }
+
+        // =======================================================
+        // 指定アルバムのHBITMAPに対応するID2D1Bitmapを取得する
+        // （Hardware Acceleration有効時のみ使用。初回描画時に1回だけ
+        // 生成してm_art_cache側にキャッシュし、以降のフレームでは
+        // 使い回す。hBitmapが変わった場合は呼び出し側の解放処理
+        // （ReleaseQueueEntryArt等）で連動して破棄される）
+        // 元画像はDIBセクション（32bppBGR・トップダウン）なので、
+        // GetObjectで得られるbmBitsをそのままD2Dへ渡せる
+        // =======================================================
+        ID2D1Bitmap* GetOrCreateD2DBitmap(const pfc::string8& album_name, HBITMAP hBitmap)
+        {
+            if (!hBitmap || !m_d2dDCRT) return nullptr;
+
+            std::string key(album_name.c_str());
+            auto it = m_art_cache.find(key);
+            if (it == m_art_cache.end()) return nullptr;
+
+            if (it->second.d2dBitmap) return it->second.d2dBitmap;
+
+            BITMAP bm = {};
+            GetObject(hBitmap, sizeof(bm), &bm);
+            if (bm.bmWidth <= 0 || bm.bmHeight <= 0 || !bm.bmBits) return nullptr;
+
+            D2D1_BITMAP_PROPERTIES props = {};
+            props.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_IGNORE;
+            props.dpiX = 96.0f;
+            props.dpiY = 96.0f;
+
+            D2D1_SIZE_U size = { (UINT32)bm.bmWidth, (UINT32)bm.bmHeight };
+            UINT32 pitch = (UINT32)bm.bmWidthBytes;  // 32bpp・パディング無し
+
+            ID2D1Bitmap* bitmap = nullptr;
+            HRESULT hr = m_d2dDCRT->CreateBitmap(size, bm.bmBits, pitch, &props, &bitmap);
+            if (FAILED(hr) || !bitmap) return nullptr;
+
+            it->second.d2dBitmap = bitmap;
+            return bitmap;
+        }
+
+
         void ClearAll()
         {
             for (auto& e : m_queue)
@@ -1170,6 +1356,7 @@ namespace {
                 if (kv.second.bitmap) DeleteObject(kv.second.bitmap);
                 if (kv.second.gdipBitmap) delete kv.second.gdipBitmap;
                 if (kv.second.gdipBitmapPrescaled) delete kv.second.gdipBitmapPrescaled;
+                if (kv.second.d2dBitmap) kv.second.d2dBitmap->Release();
             }
             m_art_cache.clear();
 
@@ -1242,6 +1429,8 @@ namespace {
                         delete it->second.gdipBitmap;
                     if (it->second.gdipBitmapPrescaled)
                         delete it->second.gdipBitmapPrescaled;
+                    if (it->second.d2dBitmap)
+                        it->second.d2dBitmap->Release();
                     it = m_art_cache.erase(it);
                 }
                 else
@@ -1841,6 +2030,23 @@ namespace {
                 gdipGraphics->SetSmoothingMode(Gdiplus::SmoothingModeNone);
             }
 
+            // v4.1.0：Hardware Acceleration有効時は、アートワーク本体の
+            // 描画をDirect2D（GDI相互運用のID2D1DCRenderTarget）に
+            // 切り替える。品質設定（Artwork Quality）は設定ダイアログ側で
+            // グレーアウトされ効果を持たないため、ここでは品質値を見ずに
+            // 無条件でこの経路を使う。BindDCはbufDC全体に対して
+            // フレーム内で1回だけ行い、各エントリの描画はBeginDraw/
+            // EndDrawの小さなセッションに包む（他のGDI描画＝背景・
+            // テキスト・ホバー枠とはセッションが重ならないようにする）
+            bool hwAccelOn = g_cfg_hw_accel.get();
+            bool d2dReady = false;
+            if (hwAccelOn)
+            {
+                d2dReady = EnsureD2DResources();
+                if (d2dReady && FAILED(m_d2dDCRT->BindDC(bufDC, &fillRc)))
+                    d2dReady = false;
+            }
+
             for (auto& entry : m_queue)
             {
                 float base_draw_x = entry.x;
@@ -1861,10 +2067,13 @@ namespace {
 
                 // v4.0.0：2px単位への丸めが「段階的な拡大縮小」に見える主因だった
                 // ため、Ultra品質の実描画だけはこの丸めをかけない連続値を使う。
+                // v4.1.0：Hardware Acceleration有効時も同様に連続値を使う
+                // （そもそも振動対策として導入した経路のため）。
                 // クリック判定・ホバー枠など見た目以外に関わる箇所は、従来通り
                 // 丸めた値（art_size）で統一し、挙動に影響を与えないようにする
+                bool useContinuousSize = (artworkQuality == 3) || (hwAccelOn && d2dReady);
                 float art_size_rounded = (float)((int)(art_size / 2.0f + 0.5f) * 2);
-                float art_size_for_draw = (artworkQuality == 3) ? art_size : art_size_rounded;
+                float art_size_for_draw = useContinuousSize ? art_size : art_size_rounded;
                 art_size = art_size_rounded;
 
                 float draw_x = base_draw_x + (base_art_size - art_size) / 2.0f;
@@ -1898,12 +2107,45 @@ namespace {
                     float dst_x = draw_x_for_draw + (art_size_for_draw - dst_w) / 2.0f;
                     float dst_y = draw_y_adj_for_draw + (art_size_for_draw - dst_h) / 2.0f;
 
+                    // v4.1.0：Hardware Acceleration有効時は、GDI+より先に
+                    // Direct2D経由で描画を試みる。1エントリごとに小さな
+                    // BeginDraw/EndDrawセッションで包むことで、前後の通常の
+                    // GDI描画（背景・テキスト・ホバー枠）とセッションが
+                    // 重ならないようにしている
+                    bool drawnWithD2D = false;
+                    if (hwAccelOn && d2dReady)
+                    {
+                        ID2D1Bitmap* d2dBmp = GetOrCreateD2DBitmap(entry.album_name, entry.hBitmap);
+                        if (d2dBmp)
+                        {
+                            D2D1_RECT_F destRect = { dst_x, dst_y, dst_x + dst_w, dst_y + dst_h };
+
+                            m_d2dDCRT->BeginDraw();
+                            m_d2dDCRT->DrawBitmap(d2dBmp, &destRect, 1.0f,
+                                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, nullptr);
+                            HRESULT hrEnd = m_d2dDCRT->EndDraw();
+
+                            if (SUCCEEDED(hrEnd))
+                            {
+                                drawnWithD2D = true;
+                            }
+                            else
+                            {
+                                // デバイスロスト等。以降このフレームはGDI/GDI+に
+                                // フォールバックし、リソースは次回描画時に
+                                // EnsureD2DResources()経由で作り直す
+                                ReleaseD2DResources();
+                                d2dReady = false;
+                            }
+                        }
+                    }
+
                     // v4.0.0：Artwork QualityがUltraの時のみ、GDI+の高品質補間
                     // （HighQualityBicubic）で描画する。遠近感演出中の連続的な
                     // サイズ変化でも輪郭がガクつかず滑らかに見えるようにするため。
                     // High/Middle/Lowは従来通りGDI（StretchBlt）のまま
                     bool drawnWithGdiplus = false;
-                    if (artworkQuality == 3 && gdipGraphics)
+                    if (!drawnWithD2D && artworkQuality == 3 && gdipGraphics)
                     {
                         // v4.0.0（ミップマップ的方式）：このパネルで実際に必要な
                         // 最大表示サイズ（max_art_size）へあらかじめ縮小済みの
@@ -1924,7 +2166,7 @@ namespace {
                         }
                     }
 
-                    if (!drawnWithGdiplus)
+                    if (!drawnWithD2D && !drawnWithGdiplus)
                     {
                         // 従来のGDI経路（Middle/Low、またはGDI+側の取得に失敗した場合のフォールバック）
                         HDC memDC = CreateCompatibleDC(bufDC);
@@ -1964,32 +2206,89 @@ namespace {
                     }
                 }
 
-                // マウスオーバー枠：アートワークのみを縁取る（固定2px）
-                // v4.0.0：Ultra品質の時は、アートワーク本体と同じ連続値
-                // （draw_x_for_draw / art_size_for_draw）を使う。丸めた値の
-                // ままだと、枠だけが2pxずつ段階的に動き、滑らかに動く
-                // アートワーク本体との間にズレが生じ、「枠をはみ出すように
-                // 振動する」ように見えてしまうため
+                // マウスオーバー枠：アートワークのみを縁取る（固定2px相当）
+                // v4.0.0：Ultra品質（v4.1.0：Hardware Acceleration有効時も
+                // 同様）の時は、アートワーク本体と同じ連続値
+                // （draw_x_for_draw / art_size_for_draw）を使う。
+                // v4.1.0：それだけでは不十分で、枠の描画自体がGDIの
+                // Rectangle()（整数座標のみ）だと、本体は浮動小数点で
+                // 滑らかに動くのに枠だけ1px単位でカクつき、両者の間に
+                // ズレが生じて「枠だけ振動して見える」原因になっていた。
+                // そのため、本体の描画エンジンに合わせて枠も同じ精度
+                // （D2D／GDI+はどちらも浮動小数点）で描く
                 if (hoverEntry == &entry)
                 {
-                    float frame_x = (artworkQuality == 3) ? draw_x_for_draw : draw_x;
-                    float frame_y = (artworkQuality == 3) ? draw_y_adj_for_draw : draw_y_adj;
-                    float frame_size = (artworkQuality == 3) ? art_size_for_draw : art_size;
+                    float frame_x = useContinuousSize ? draw_x_for_draw : draw_x;
+                    float frame_y = useContinuousSize ? draw_y_adj_for_draw : draw_y_adj;
+                    float frame_size = useContinuousSize ? art_size_for_draw : art_size;
 
-                    RECT frameRc = {
-                        (int)(frame_x + 0.5f), (int)(frame_y + 0.5f),
-                        (int)(frame_x + frame_size + 0.5f), (int)(frame_y + frame_size + 0.5f)
-                    };
+                    COLORREF frameColor = GetHoverFrameColor();
+                    bool drawnFrame = false;
 
-                    HPEN framePen = CreatePen(PS_SOLID, 2, GetHoverFrameColor());
-                    HPEN oldPen = (HPEN)SelectObject(bufDC, framePen);
-                    HBRUSH oldBrush = (HBRUSH)SelectObject(bufDC, GetStockObject(NULL_BRUSH));
+                    if (hwAccelOn && d2dReady)
+                    {
+                        D2D1_RECT_F frameRectF = {
+                            frame_x, frame_y,
+                            frame_x + frame_size, frame_y + frame_size
+                        };
+                        D2D1_COLOR_F colorF = {
+                            GetRValue(frameColor) / 255.0f,
+                            GetGValue(frameColor) / 255.0f,
+                            GetBValue(frameColor) / 255.0f,
+                            1.0f
+                        };
 
-                    Rectangle(bufDC, frameRc.left, frameRc.top, frameRc.right, frameRc.bottom);
+                        ID2D1SolidColorBrush* frameBrush = nullptr;
+                        m_d2dDCRT->BeginDraw();
+                        HRESULT hrBrush = m_d2dDCRT->CreateSolidColorBrush(colorF, &frameBrush);
+                        if (SUCCEEDED(hrBrush) && frameBrush)
+                        {
+                            m_d2dDCRT->DrawRectangle(frameRectF, frameBrush, 2.0f);
+                            frameBrush->Release();
+                        }
+                        HRESULT hrEnd = m_d2dDCRT->EndDraw();
 
-                    SelectObject(bufDC, oldBrush);
-                    SelectObject(bufDC, oldPen);
-                    DeleteObject(framePen);
+                        if (SUCCEEDED(hrEnd))
+                        {
+                            drawnFrame = true;
+                        }
+                        else
+                        {
+                            // デバイスロスト等。以降このフレームはGDI/GDI+に
+                            // フォールバックする
+                            ReleaseD2DResources();
+                            d2dReady = false;
+                        }
+                    }
+
+                    if (!drawnFrame && artworkQuality == 3 && gdipGraphics)
+                    {
+                        Gdiplus::Pen framePen(
+                            Gdiplus::Color(255,
+                                GetRValue(frameColor), GetGValue(frameColor), GetBValue(frameColor)),
+                            2.0f);
+                        gdipGraphics->DrawRectangle(&framePen,
+                            Gdiplus::RectF(frame_x, frame_y, frame_size, frame_size));
+                        drawnFrame = true;
+                    }
+
+                    if (!drawnFrame)
+                    {
+                        RECT frameRc = {
+                            (int)(frame_x + 0.5f), (int)(frame_y + 0.5f),
+                            (int)(frame_x + frame_size + 0.5f), (int)(frame_y + frame_size + 0.5f)
+                        };
+
+                        HPEN framePen = CreatePen(PS_SOLID, 2, frameColor);
+                        HPEN oldPen = (HPEN)SelectObject(bufDC, framePen);
+                        HBRUSH oldBrush = (HBRUSH)SelectObject(bufDC, GetStockObject(NULL_BRUSH));
+
+                        Rectangle(bufDC, frameRc.left, frameRc.top, frameRc.right, frameRc.bottom);
+
+                        SelectObject(bufDC, oldBrush);
+                        SelectObject(bufDC, oldPen);
+                        DeleteObject(framePen);
+                    }
                 }
 
                 if (g_cfg_show_album_name.get())
@@ -2483,6 +2782,7 @@ namespace {
             g_cfg_fix_text_position = ctx->staging.fixTextPosition;
             g_cfg_show_hover_frame = ctx->staging.showHoverFrame;
             g_cfg_hover_frame_color = ctx->staging.hoverFrameColor;
+            g_cfg_hw_accel = ctx->staging.hwAccel;
 
             // フォーマット文字列は、コミット時にエディットボックスから直接取得する
             HWND editBox = GetDlgItem(hDlg, IDC_FORMAT_EDIT);
@@ -2568,6 +2868,9 @@ namespace {
                 ctx->staging.bgImageQuality = (int)g_cfg_bg_image_quality.get();
                 ctx->staging.showHoverFrame = g_cfg_show_hover_frame.get();
                 ctx->staging.hoverFrameColor = g_cfg_hover_frame_color.get();
+                // NVIDIA製GPUが検出できない環境では、以前オンにしていた
+                // 設定値が残っていても無視し、常にオフとして扱う
+                ctx->staging.hwAccel = g_cfg_hw_accel.get() && IsNvidiaGpuAvailable();
 
 
                 SetWindowLongPtr(hDlg, GWLP_USERDATA, (LONG_PTR)ctx);
@@ -2645,7 +2948,7 @@ namespace {
                 yRight += themeGroupH + groupGap;
 
                 // ---- グループ3（左列）：Artwork ----
-                int artworkGroupH = titleSpace + rowH * 8 + groupPad;
+                int artworkGroupH = titleSpace + rowH * 10 + groupPad;
                 CreateWindowEx(0, _T("BUTTON"), _T("Artwork"),
                     WS_CHILD | WS_VISIBLE | BS_GROUPBOX,
                     MARGIN, yLeft, GROUP_W, artworkGroupH, hDlg, NULL, NULL, NULL);
@@ -2686,8 +2989,23 @@ namespace {
                     }
                     SendMessage(artworkQualityCombo, CB_SETCURSEL, initialIndex, 0);
                 }
-                EnableWindow(artworkQualityCombo, !ctx->staging.stabilityMode);
+                EnableWindow(artworkQualityCombo, !ctx->staging.stabilityMode && !ctx->staging.hwAccel);
                 naY += rowH;
+
+                // --- Hardware Acceleration（v4.1.0：土台のみ。NVIDIA製GPUが
+                //     検出できた環境でのみオンにできる。実際の描画切り替えは
+                //     次のステップで実装予定） ---
+                bool hwAccelAvailable = IsNvidiaGpuAvailable();
+                if (!hwAccelAvailable) ctx->staging.hwAccel = false;
+
+                HWND hwAccelCheck = CreateWindowEx(0, _T("BUTTON"), _T("Hardware Acceleration\r\n(NVIDIA GPU)"),
+                    WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | BS_MULTILINE,
+                    CONTENT_X, naY, CONTENT_W, rowH * 2, hDlg, (HMENU)(INT_PTR)IDC_HWACCEL_CHECK,
+                    NULL, NULL);
+                SendMessage(hwAccelCheck, BM_SETCHECK,
+                    ctx->staging.hwAccel ? BST_CHECKED : BST_UNCHECKED, 0);
+                EnableWindow(hwAccelCheck, hwAccelAvailable && !ctx->staging.stabilityMode);
+                naY += rowH * 2;
 
                 // --- Show Hover Frame（マウスオーバー時にアートワークへ枠を表示） ---
                 HWND hoverFrameCheck = CreateWindowEx(0, _T("BUTTON"), _T("Show Hover Frame"),
@@ -3348,6 +3666,19 @@ namespace {
                     }
                     return TRUE;
                 }
+                else if (LOWORD(wp) == IDC_HWACCEL_CHECK)
+                {
+                    HWND check = GetDlgItem(hDlg, IDC_HWACCEL_CHECK);
+                    bool checked = (SendMessage(check, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                    if (ctx) ctx->staging.hwAccel = checked;
+
+                    // Hardware Acceleration有効時は、アートワーク描画が
+                    // 品質設定に関わらずD2Dに統一されるため、Artwork Quality
+                    // コンボは無効化する（設定が効いていないという誤解を防ぐため）
+                    EnableWindow(GetDlgItem(hDlg, IDC_ARTWORK_QUALITY_COMBO),
+                        !checked && ctx && !ctx->staging.stabilityMode);
+                    return TRUE;
+                }
                 else if (LOWORD(wp) == IDC_HOVER_FRAME_CHECK)
                 {
                     HWND check = GetDlgItem(hDlg, IDC_HOVER_FRAME_CHECK);
@@ -3431,8 +3762,9 @@ namespace {
                 {
                     if (ctx) ctx->staging.stabilityMode = false;
                     EnableWindow(GetDlgItem(hDlg, IDC_SHOWNOART_CHECK), TRUE);
-                    EnableWindow(GetDlgItem(hDlg, IDC_ARTWORK_QUALITY_COMBO), TRUE);
+                    EnableWindow(GetDlgItem(hDlg, IDC_ARTWORK_QUALITY_COMBO), ctx && !ctx->staging.hwAccel);
                     EnableWindow(GetDlgItem(hDlg, IDC_BG_IMAGE_QUALITY_COMBO), ctx && ctx->staging.bgUseImage);
+                    EnableWindow(GetDlgItem(hDlg, IDC_HWACCEL_CHECK), IsNvidiaGpuAvailable());
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_MODE_STABILITY)
@@ -3453,6 +3785,13 @@ namespace {
                     SendMessage(bgQualityCombo, CB_SETCURSEL, 2, 0);  // Low
                     EnableWindow(bgQualityCombo, FALSE);
                     if (ctx) ctx->staging.bgImageQuality = 2;  // Low
+
+                    // Stability Focused中はHardware Accelerationも強制オフ
+                    // （安定性・軽量さを優先するモードのため）
+                    HWND hwAccelCheck = GetDlgItem(hDlg, IDC_HWACCEL_CHECK);
+                    SendMessage(hwAccelCheck, BM_SETCHECK, BST_UNCHECKED, 0);
+                    EnableWindow(hwAccelCheck, FALSE);
+                    if (ctx) ctx->staging.hwAccel = false;
                     return TRUE;
                     }
                 else if (LOWORD(wp) == IDC_APPLY_BTN)
@@ -3624,6 +3963,13 @@ namespace {
         // 直近でホバー中と判定していたエントリ（変化検知用。再描画は
         // これが変わった時だけ行う）
         QueueEntry*                             m_lastHoverEntry = nullptr;
+
+        // v4.1.0：Hardware Acceleration用のD2Dリソース（必要になった
+        // 時点で遅延生成する。生成に失敗した場合はm_d2dInitFailedを
+        // 立て、以降は毎フレーム再試行せずGDI/GDI+側にフォールバックする）
+        ID2D1Factory*                           m_d2dFactory = nullptr;
+        ID2D1DCRenderTarget*                    m_d2dDCRT = nullptr;
+        bool                                    m_d2dInitFailed = false;
     };
      
     // Columns UI パネルとして登録
