@@ -108,6 +108,12 @@ namespace {
     // タイマーID
     static const UINT_PTR TIMER_SCROLL = 1;
     static const UINT_PTR TIMER_ARTWORK = 2;
+    // v4.1.1：ライブラリの監視フォルダ変更（on_items_added/on_items_removed）を
+    // 検知してからの再読み込み用。同じIDでSetTimerを呼び直すとカウントダウンが
+    // リセットされる性質を利用し、短時間に連続して変更が来ても最後の1回だけ
+    // 実際に再読み込みするデバウンス処理に使う
+    static const UINT_PTR TIMER_LIBRARY_RELOAD = 3;
+    static const UINT LIBRARY_RELOAD_DEBOUNCE_MS = 800;
 
     // 設定ダイアログのコントロールID
     static const int IDC_SPEED_SLIDER = 1001;
@@ -999,6 +1005,7 @@ namespace {
             case WM_DESTROY:
                 KillTimer(wnd, TIMER_SCROLL);
                 KillTimer(wnd, TIMER_ARTWORK);
+                KillTimer(wnd, TIMER_LIBRARY_RELOAD);
                 m_hwnd = NULL;
                 return 0;
 
@@ -1080,6 +1087,29 @@ namespace {
             BuildLibraryIndex();
             InitQueue();
             if (m_hwnd) InvalidateRect(m_hwnd, NULL, FALSE);
+        }
+
+        // =======================================================
+        // v4.1.1：ライブラリの監視フォルダ変更（ファイルの追加・削除）を
+        // 検知して、アルバムトレインの表示内容を自動的に再読み込みする。
+        // 呼ばれるたびに同じタイマーIDでSetTimerを呼び直すことで、
+        // 大量のファイルがまとめて追加/削除された際に何度も連続で
+        // フル再構築が走らないようにしている（最後の変更から
+        // LIBRARY_RELOAD_DEBOUNCE_MSだけ経過した時点で1回だけ実行される）
+        // =======================================================
+        void on_items_added(metadb_handle_list_cref) override
+        {
+            RequestLibraryReload();
+        }
+
+        void on_items_removed(metadb_handle_list_cref) override
+        {
+            RequestLibraryReload();
+        }
+
+        void RequestLibraryReload()
+        {
+            if (m_hwnd) SetTimer(m_hwnd, TIMER_LIBRARY_RELOAD, LIBRARY_RELOAD_DEBOUNCE_MS, NULL);
         }
 
     private:
@@ -1913,6 +1943,15 @@ namespace {
             else if (id == TIMER_ARTWORK)
             {
                 FetchOneArtwork();
+            }
+            else if (id == TIMER_LIBRARY_RELOAD)
+            {
+                // デバウンス用タイマーが（追加/削除の連続発生が落ち着いて）
+                // 満了した時点で、実際にライブラリを再読み込みする
+                if (m_hwnd) KillTimer(m_hwnd, TIMER_LIBRARY_RELOAD);
+                BuildLibraryIndex();
+                InitQueue();
+                if (m_hwnd) InvalidateRect(m_hwnd, NULL, FALSE);
             }
         }
 

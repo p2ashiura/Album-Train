@@ -311,6 +311,8 @@ v4.0.0: Added an experimental "Ultra (Beta)" Artwork Quality option using GDI+ h
         遠近感演出をより滑らかにする狙いで、GDI+高品質補間と事前縮小キャッシュを使った試験的な「Ultra (Beta)」品質を追加。あわせて、重いアルバムの原因になっていた埋め込みアートワークのデコード解像度上限（512px）を追加
 v4.1.0: Added Hardware Acceleration (NVIDIA GPU only), rendering artwork via Direct2D (GDI interop, ID2D1DCRenderTarget) instead of GDI/GDI+, noticeably reducing jitter during the perspective effect. Greys out Artwork Quality while enabled. Also unified the hover-frame drawing precision with the active rendering engine (D2D/GDI+/GDI), fixing a frame-only jitter that had been present under Ultra quality
         Hardware Acceleration（NVIDIA製GPU限定）を追加。GDI相互運用のDirect2D（ID2D1DCRenderTarget）でアートワークを描画するようになり、遠近感演出時の振動が体感できるレベルで軽減。有効時はArtwork Qualityをグレーアウト。あわせて、マウスオーバー枠の描画精度を実際に使われている描画エンジン（D2D／GDI+／GDI）に合わせて統一し、Ultra品質でのみ発生していた枠だけの振動を修正
+v4.1.1: Album Train now automatically reloads its contents when the monitored library folders change (files added/removed), without requiring a foobar2000 restart. Rapid consecutive changes are debounced so only one reload happens after things settle
+        ライブラリの監視フォルダが変更された際（ファイルの追加・削除）、foobar2000の再起動を挟まずアルバムトレインの表示内容を自動的に再読み込みするように。連続した変更はデバウンスされ、変更が落ち着いた後に1回だけ再読み込みが行われる
 ```
 
 </details>
@@ -321,54 +323,44 @@ v4.1.0: Added Hardware Acceleration (NVIDIA GPU only), rendering artwork via Dir
 
 ### UI/UX
 - Dropdown-based font selection UI
+- Consider adding more steps to the Scroll Speed slider
+- Ongoing settings dialog design improvements (an evolving effort, revisited as development continues)
 
 ### Performance / Architecture
 - Investigate a smoother rendering method for the perspective (scaling) effect (started in v4.0.0: tried GDI+ high-quality interpolation, removing 2px rounding, a higher-frequency timer, and a mipmap-like pre-scaled cache — none produced a dramatic improvement. The remaining jitter is likely an inherent limitation of per-frame independent resampling at continuously-changing sub-pixel positions, which a simple GDI/GDI+-based renderer can't easily fix structurally. Addressed in v4.1.0 with Hardware Acceleration (NVIDIA GPU only) via Direct2D GDI interop, which noticeably reduced the jitter. Its interpolation is limited to Linear/Nearest, though, so achieving Ultra-level or better interpolation quality would require a further move to a full `ID2D1DeviceContext`/Direct3D 11 setup)
+- Expand Hardware Acceleration (v4.1.0) to cover more than just artwork (e.g. the background image), which currently isn't rendered via Direct2D
 
 ### Broader UI support
 - Support for foobar2000's Default UI
 
 ### Known limitations / bugs
 - Background transparency can't be verified on 64-bit foobar2000 since Panel Stack Splitter isn't available there (implemented internally, not exposed)
-
-### Layout redesign considerations
-- Idea: move the "Scroll" group to the bottom of the group order
+- Regarding the "Ultra (Beta)" Artwork Quality option: as of v4.0.0 it hasn't produced a clearly noticeable visual smoothness improvement. If further testing doesn't change that, consider removing it from the settings dialog
 
 ### Under consideration (undecided)
-- Consider adding more steps to the Scroll Speed slider
 - Font size range (tied to panel height)
-- Settings dialog design idea: swap the positions of the "Text" group (currently left column) and the "Background" group (currently right column)
-- Automatically reload the Album Train's contents when the monitored library folders change, without requiring a foobar2000 restart
-- Regarding the "Ultra (Beta)" Artwork Quality option: as of v4.0.0 it hasn't produced a clearly noticeable visual smoothness improvement. If further testing doesn't change that, consider removing it from the settings dialog
-- Expand Hardware Acceleration (v4.1.0) to cover more than just artwork (e.g. the background image), which currently isn't rendered via Direct2D
-
-### Future ideas
+- Adjust the mouse-hover frame (v3.5.0) thickness to scale somewhat with the panel/artwork size, instead of staying a fixed 2px
 - Expanding the kinds of content that can be shown as a background, such as a visualizer
 
 ### UI/UX関連
 - フォント選択UIのプルダウン化
+- Scroll Speedのスライダをさらに多段階にすることを検討
+- 設定ダイアログのデザイン改善（今後の開発を通じて随時見直していく継続的な方針）
 
 ### パフォーマンス・アーキテクチャ関連
 - 遠近感演出（拡大縮小）のさらなる滑らかな表示方式の検討（v4.0.0で着手。GDI+高品質補間・2px丸めの除去・タイマー間隔の高頻度化・ミップマップ的な事前縮小キャッシュを試したが、いずれも劇的な効果は得られず。残る振動は、位置（サブピクセル単位）の連続的な変化に対する、フレームごとに独立した再サンプリングそのものの限界である可能性が高く、GDI/GDI+ベースの単純な描画方式では構造的な対応が難しいと判断。v4.1.0にて、Direct2D（GDI相互運用）によるHardware Acceleration（NVIDIA製GPU限定）で対応し、体感できるレベルで振動を軽減。ただし補間モードがLinear/Nearestに限定されるため、Ultra以上の補間品質が必要になった場合は、`ID2D1DeviceContext`／Direct3D 11によるフル構成への移行が別途必要）
+- Hardware Acceleration（v4.1.0）の適用範囲拡大。現状はアートワーク本体のみDirect2D描画で、背景画像等は対象外
 
 ### 対応UI拡大
 - foobar2000のDefault UIへの対応
 
 ### 既知の制約・バグ
 - 背景透明化機能は64bit版foobar2000でPanel Stack Splitterが使えず検証不可（内部実装済み・非公開）
-
-### レイアウト再設計時の検討事項
-- 「Scroll」グループをグループ順序の最下部に配置する案
+- Artwork Qualityの「Ultra (Beta)」について、v4.0.0時点では視覚的な滑らかさの向上が体感できるレベルには至っていない。今後さらに検証しても見込みが薄いようであれば、設定ダイアログの選択肢から外すことを検討する
 
 ### 今後の検討事項（未確定）
-- Scroll Speedのスライダをさらに多段階にすることを検討
 - フォントサイズ変更の許容範囲（パネル高さとの連動）
-- 設定ダイアログのデザイン案：現在左列にある「Text」グループと、右列にある「Background」グループの位置を左右入れ替える案
-- ライブラリの監視フォルダが変更された際、foobar2000の再起動を挟まなくてもアルバムトレインの表示内容を自動的に再読み込みする機能
-- Artwork Qualityの「Ultra (Beta)」について、v4.0.0時点では視覚的な滑らかさの向上が体感できるレベルには至っていない。今後さらに検証しても見込みが薄いようであれば、設定ダイアログの選択肢から外すことを検討する
-- Hardware Acceleration（v4.1.0）の適用範囲拡大。現状はアートワーク本体のみDirect2D描画で、背景画像等は対象外
-
-### 将来構想
+- マウスオーバー時の枠（v3.5.0）の太さを、固定2pxのままにせず、パネル・アートワークのサイズにある程度追従させる案
 - ヴィジュアライザーなど、背景に表示できるコンテンツの種類を増やす構想
 
 ---
