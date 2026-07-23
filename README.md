@@ -313,6 +313,8 @@ v4.1.0: Added Hardware Acceleration (NVIDIA GPU only), rendering artwork via Dir
         Hardware Acceleration（NVIDIA製GPU限定）を追加。GDI相互運用のDirect2D（ID2D1DCRenderTarget）でアートワークを描画するようになり、遠近感演出時の振動が体感できるレベルで軽減。有効時はArtwork Qualityをグレーアウト。あわせて、マウスオーバー枠の描画精度を実際に使われている描画エンジン（D2D／GDI+／GDI）に合わせて統一し、Ultra品質でのみ発生していた枠だけの振動を修正
 v4.1.1: Album Train now automatically reloads its contents when the monitored library folders change (files added/removed), without requiring a foobar2000 restart. Rapid consecutive changes are debounced so only one reload happens after things settle
         ライブラリの監視フォルダが変更された際（ファイルの追加・削除）、foobar2000の再起動を挟まずアルバムトレインの表示内容を自動的に再読み込みするように。連続した変更はデバウンスされ、変更が落ち着いた後に1回だけ再読み込みが行われる
+v4.1.2: Improved the settings dialog's feel: buttons are now ordered OK/Cancel/Apply (matching foobar2000's own Preferences dialog); Apply stays greyed out until something actually changes, and greys out again if you revert to the original value; pressing OK with no changes no longer reloads Album Train's contents. Also, changes are now applied without reshuffling the train except for the few settings that genuinely require it (Mode, Show Albums Without Artwork, Artwork Quality, Hardware Acceleration)
+        設定ダイアログの操作感を改善：ボタンの並びをOK・Cancel・Apply（foobar2000本体のPreferencesダイアログに合わせた順）に変更。実際に何か変更するまでApplyはグレーアウトしたままになり、値を元に戻すと再びグレーアウトする。何も変更せずにOKを押してもアルバムトレインの表示内容は再読み込みされない。あわせて、本当に再読み込みが必要な項目（Mode・Show Albums Without Artwork・Artwork Quality・Hardware Acceleration）以外は、表示のリシャッフルをせずに変更が反映されるように
 ```
 
 </details>

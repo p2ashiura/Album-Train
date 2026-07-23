@@ -855,7 +855,118 @@ namespace {
             HBRUSH hTextBrush = NULL;
             HBRUSH hNoArtBrush = NULL;
             HBRUSH hHoverFrameBrush = NULL;
+            // v4.2.0：設定ダイアログを開いた時点（または直近のApply/OK時点）の
+            // 値。現在のstagingと比較して、実際に差分があるかどうかで
+            // Applyボタンの活性/非活性を判定する（値を元に戻したら
+            // Applyが再びグレーアウトするようにするため）
+            bool isDirty = false;
+            SettingsStaging baseline;
+            pfc::string8 baselineFormat1;
+            pfc::string8 baselineFormat2;
         };
+
+        // v4.2.0：LOGFONTの実質的な内容（表示に影響する部分）が
+        // 同一かどうかを比較する。lfFaceNameの余剰バイトやパディングの
+        // 差異に影響されないよう、memcmpではなくフィールド単位で比較する
+        static bool LogFontsEqual(const LOGFONT& a, const LOGFONT& b)
+        {
+            return a.lfHeight == b.lfHeight &&
+                a.lfWeight == b.lfWeight &&
+                a.lfItalic == b.lfItalic &&
+                a.lfUnderline == b.lfUnderline &&
+                a.lfStrikeOut == b.lfStrikeOut &&
+                a.lfCharSet == b.lfCharSet &&
+                _tcscmp(a.lfFaceName, b.lfFaceName) == 0;
+        }
+
+        // v4.2.0：ステージング領域どうしを比較し、実質的に同じ内容かを判定する
+        static bool StagingEquals(const SettingsStaging& a, const SettingsStaging& b)
+        {
+            return a.speed == b.speed &&
+                a.showNoArt == b.showNoArt &&
+                a.wheelScroll == b.wheelScroll &&
+                a.showAlbumName == b.showAlbumName &&
+                a.perspective == b.perspective &&
+                a.scrollRTL == b.scrollRTL &&
+                a.useSecondLine == b.useSecondLine &&
+                a.useThemeColors == b.useThemeColors &&
+                a.stabilityMode == b.stabilityMode &&
+                a.gap1 == b.gap1 &&
+                a.gap2 == b.gap2 &&
+                LogFontsEqual(a.font, b.font) &&
+                a.bgColor == b.bgColor &&
+                a.textColor == b.textColor &&
+                a.noArtColor == b.noArtColor &&
+                a.bgUseImage == b.bgUseImage &&
+                strcmp(a.bgImagePath.get_ptr(), b.bgImagePath.get_ptr()) == 0 &&
+                a.noArtUseImage == b.noArtUseImage &&
+                strcmp(a.noArtImagePath.get_ptr(), b.noArtImagePath.get_ptr()) == 0 &&
+                a.artworkQuality == b.artworkQuality &&
+                a.bgImageQuality == b.bgImageQuality &&
+                a.fixTextPosition == b.fixTextPosition &&
+                a.showHoverFrame == b.showHoverFrame &&
+                a.hoverFrameColor == b.hoverFrameColor &&
+                a.hwAccel == b.hwAccel;
+        }
+
+        // v4.2.0：設定ダイアログの操作後に呼び、現在のstagingが
+        // ベースライン（開いた時点／直近のApply・OK時点の値）と
+        // 比較して実際に差分があるかどうかでApplyボタンの活性状態を
+        // 更新する。値を変更前に戻した場合はApplyが再び無効になる
+        static void RecomputeDirtyState(HWND hDlg, SettingsDialogContext* ctx)
+        {
+            if (!ctx) return;
+
+            bool changed = !StagingEquals(ctx->staging, ctx->baseline);
+
+            if (!changed)
+            {
+                TCHAR buf[256] = {};
+                GetWindowText(GetDlgItem(hDlg, IDC_FORMAT_EDIT), buf, 256);
+                pfc::stringcvt::string_utf8_from_os text_utf8(buf);
+                if (strcmp(text_utf8.get_ptr(), ctx->baselineFormat1.get_ptr()) != 0)
+                    changed = true;
+            }
+            if (!changed)
+            {
+                TCHAR buf2[256] = {};
+                GetWindowText(GetDlgItem(hDlg, IDC_FORMAT2_EDIT), buf2, 256);
+                pfc::stringcvt::string_utf8_from_os text2_utf8(buf2);
+                if (strcmp(text2_utf8.get_ptr(), ctx->baselineFormat2.get_ptr()) != 0)
+                    changed = true;
+            }
+
+            ctx->isDirty = changed;
+            EnableWindow(GetDlgItem(hDlg, IDC_APPLY_BTN), changed ? TRUE : FALSE);
+        }
+
+        // v4.2.0：Apply実行時に呼び、ベースラインを「今まさに適用した内容」
+        // まで進める。これを呼ばずにいると、Apply後に別の項目を変更してから
+        // 元に戻した際、Apply前の値と比較してしまい正しく判定できない
+        static void SnapshotBaselineFromCurrent(HWND hDlg, SettingsDialogContext* ctx)
+        {
+            if (!ctx) return;
+            ctx->baseline = ctx->staging;
+
+            TCHAR buf[256] = {};
+            GetWindowText(GetDlgItem(hDlg, IDC_FORMAT_EDIT), buf, 256);
+            pfc::stringcvt::string_utf8_from_os text_utf8(buf);
+            ctx->baselineFormat1 = text_utf8.get_ptr();
+
+            TCHAR buf2[256] = {};
+            GetWindowText(GetDlgItem(hDlg, IDC_FORMAT2_EDIT), buf2, 256);
+            pfc::stringcvt::string_utf8_from_os text2_utf8(buf2);
+            ctx->baselineFormat2 = text2_utf8.get_ptr();
+        }
+
+        // Apply/OK実行後、あるいはダイアログの初期表示時に呼び、
+        // 「変更なし」の状態に戻す
+        static void ClearSettingsDirty(HWND hDlg, SettingsDialogContext* ctx)
+        {
+            if (!ctx) return;
+            ctx->isDirty = false;
+            EnableWindow(GetDlgItem(hDlg, IDC_APPLY_BTN), FALSE);
+        }
 
         // -------------------------------------------------------
         // コンストラクタ
@@ -2791,10 +2902,75 @@ namespace {
             if (m_hwnd) InvalidateRect(m_hwnd, NULL, FALSE);
         }
 
+        // v4.2.0：「Text」グループのみの変更など、キューの作り直しが
+        // 不要な設定変更の際に使う。既存のキュー（表示中のアルバムの
+        // 並び・スクロール位置）はそのままに、見た目だけを更新する
+        void RequestRedrawOnly()
+        {
+            if (m_hwnd) InvalidateRect(m_hwnd, NULL, FALSE);
+        }
+
+        // v4.2.0：フォーマット文字列やUse Second Lineが変更された時に使う。
+        // display_name/display_name2は各エントリ生成時に評価・キャッシュ
+        // される値のため、キュー自体（並び・スクロール位置・アートワーク）
+        // はそのままに、既存の全エントリの表示テキストだけを新しい
+        // フォーマットで再生成する
+        void RefreshDisplayText()
+        {
+            EnsureCompiledScript(m_compiled_script1, m_cached_format1,
+                g_cfg_album_format.get().c_str(), "%album%");
+
+            bool useSecondLine = g_cfg_use_second_line.get();
+            if (useSecondLine)
+            {
+                EnsureCompiledScript(m_compiled_script2, m_cached_format2,
+                    g_cfg_album_format2.get().c_str(), "");
+            }
+
+            for (auto& e : m_queue)
+            {
+                e.display_name = ApplyCompiledScript(
+                    e.first_track, m_compiled_script1, "%album%");
+
+                if (useSecondLine)
+                {
+                    e.display_name2 = ApplyCompiledScript(
+                        e.first_track, m_compiled_script2, "");
+                }
+                else
+                {
+                    e.display_name2 = "";
+                }
+            }
+
+            if (m_hwnd) InvalidateRect(m_hwnd, NULL, FALSE);
+        }
+
         // =======================================================
         // ステージング領域の内容を実際の設定変数に反映する
         // Apply / OK ボタン押下時にのみ呼ばれる
         // =======================================================
+        // v4.2.0：フルの再読み込み（キューの作り直し・表示のリシャッフル）が
+        // 本当に必要なのは、キューの構築内容そのものに影響する項目だけ。
+        // 具体的には以下の4項目：
+        //   - stabilityMode（Modeグループ）：Show Albums Without Artworkを
+        //     強制するため、対象アルバムの母集団が変わりうる
+        //   - showNoArt（Show Albums Without Artwork）：対象アルバムの
+        //     母集団そのものが変わる
+        //   - artworkQuality（Artwork Quality）：描画エンジンの切り替え
+        //   - hwAccel（Hardware Acceleration）：描画エンジンの切り替え
+        // それ以外の項目は、GetSpacing（キューの間隔計算）にも各エントリの
+        // display_name等のキャッシュにも影響しない、純粋な描画時の設定
+        // （色・フォント・ホバー枠・背景画像・遠近感演出・スクロール方向/
+        // 速度・マウスホイールなど）であることを確認済み
+        static bool StagingRequiresFullReload(const SettingsStaging& a, const SettingsStaging& b)
+        {
+            return a.stabilityMode != b.stabilityMode ||
+                a.showNoArt != b.showNoArt ||
+                a.artworkQuality != b.artworkQuality ||
+                a.hwAccel != b.hwAccel;
+        }
+
         static void CommitSettings(HWND hDlg, SettingsDialogContext* ctx)
         {
             g_cfg_scroll_speed = ctx->staging.speed;
@@ -2830,6 +3006,13 @@ namespace {
             pfc::stringcvt::string_utf8_from_os text_utf8(buf);
             g_cfg_album_format = text_utf8.get_ptr();
 
+            // v4.2.0：フォーマット文字列自体、またはUse Second Lineの
+            // オン/オフが変わったかどうかも判定に使う（変わっていれば、
+            // 各エントリの表示テキストを作り直す必要がある）
+            bool formatChanged =
+                (strcmp(text_utf8.get_ptr(), ctx->baselineFormat1.get_ptr()) != 0) ||
+                (ctx->staging.useSecondLine != ctx->baseline.useSecondLine);
+
             if (ctx->staging.useSecondLine)
             {
                 HWND editBox2 = GetDlgItem(hDlg, IDC_FORMAT2_EDIT);
@@ -2837,10 +3020,29 @@ namespace {
                 GetWindowText(editBox2, buf2, 256);
                 pfc::stringcvt::string_utf8_from_os text2_utf8(buf2);
                 g_cfg_album_format2 = text2_utf8.get_ptr();
+
+                if (strcmp(text2_utf8.get_ptr(), ctx->baselineFormat2.get_ptr()) != 0)
+                    formatChanged = true;
             }
 
             if (ctx->panel)
-                ctx->panel->OnSettingsChanged();
+            {
+                // v4.2.0：3段階で反映方法を判定する
+                //   1. Mode・Show Albums Without Artwork・Artwork Quality・
+                //      Hardware Accelerationのいずれかが変わっていれば、
+                //      フルの再読み込み（キューの作り直し）
+                //   2. それら以外で、フォーマット文字列またはUse Second Line
+                //      が変わっていれば、キューは維持したまま表示テキストだけ
+                //      再生成
+                //   3. それ以外（色・フォント・ホバー枠・背景画像・遠近感
+                //      演出等）は、単純な再描画だけで済ませる
+                if (StagingRequiresFullReload(ctx->staging, ctx->baseline))
+                    ctx->panel->OnSettingsChanged();
+                else if (formatChanged)
+                    ctx->panel->RefreshDisplayText();
+                else
+                    ctx->panel->RequestRedrawOnly();
+            }
         }
 
         // =======================================================
@@ -2910,6 +3112,12 @@ namespace {
                 // NVIDIA製GPUが検出できない環境では、以前オンにしていた
                 // 設定値が残っていても無視し、常にオフとして扱う
                 ctx->staging.hwAccel = g_cfg_hw_accel.get() && IsNvidiaGpuAvailable();
+
+                // v4.2.0：この時点（開いた直後）の値をベースラインとして
+                // 記録しておく。以降、ここに戻ればApplyが再びグレーアウトする
+                ctx->baseline = ctx->staging;
+                ctx->baselineFormat1 = g_cfg_album_format.get();
+                ctx->baselineFormat2 = g_cfg_album_format2.get();
 
 
                 SetWindowLongPtr(hDlg, GWLP_USERDATA, (LONG_PTR)ctx);
@@ -3404,7 +3612,9 @@ namespace {
 
                 yRight += backgroundGroupH + groupGap;
 
-                // ---- Cancel / Apply / OK ボタン（ウィンドウ右下に配置） ----
+                // ---- OK / Cancel / Apply ボタン（ウィンドウ右下に配置）
+                // v4.2.0：foobar2000本体のPreferencesダイアログに合わせ、
+                // 並び順をOK・Cancel・Applyに変更 ----
                 int btnH = rowH + 2;
                 const int BTN_W = 65;
                 const int BTN_GAP = 5;
@@ -3416,20 +3626,28 @@ namespace {
                 int btnRight = desiredClientW - MARGIN;
                 int btnX0 = btnRight - btnBlockW;
 
+                CreateWindowEx(0, _T("BUTTON"), _T("OK"),
+                    WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                    btnX0, btnY, BTN_W, btnH, hDlg, (HMENU)(INT_PTR)IDOK,
+                    NULL, NULL);
+
                 CreateWindowEx(0, _T("BUTTON"), _T("Cancel"),
                     WS_CHILD | WS_VISIBLE,
-                    btnX0, btnY, BTN_W, btnH, hDlg, (HMENU)(INT_PTR)IDCANCEL,
+                    btnX0 + (BTN_W + BTN_GAP), btnY, BTN_W, btnH, hDlg, (HMENU)(INT_PTR)IDCANCEL,
                     NULL, NULL);
 
                 CreateWindowEx(0, _T("BUTTON"), _T("Apply"),
                     WS_CHILD | WS_VISIBLE,
-                    btnX0 + (BTN_W + BTN_GAP), btnY, BTN_W, btnH, hDlg, (HMENU)(INT_PTR)IDC_APPLY_BTN,
+                    btnX0 + (BTN_W + BTN_GAP) * 2, btnY, BTN_W, btnH, hDlg, (HMENU)(INT_PTR)IDC_APPLY_BTN,
                     NULL, NULL);
 
-                CreateWindowEx(0, _T("BUTTON"), _T("OK"),
-                    WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                    btnX0 + (BTN_W + BTN_GAP) * 2, btnY, BTN_W, btnH, hDlg, (HMENU)(INT_PTR)IDOK,
-                    NULL, NULL);
+                // v4.2.0：開いた直後は変更が無い状態のはずだが、直前までに
+                // 作成した各エディットボックスへ初期値をSetWindowTextで
+                // セットした際、EN_CHANGE通知が発生してisDirtyが誤って
+                // trueになっている可能性があるため、ボタン作成後に
+                // 明示的にリセットする（EnableWindowだけでなくisDirty
+                // フラグ自体も確実にfalseへ戻す）
+                ClearSettingsDirty(hDlg, ctx);
 
                 int y = btnY + btnH + 10;
 
@@ -3512,6 +3730,7 @@ namespace {
                 HWND slider = GetDlgItem(hDlg, IDC_SPEED_SLIDER);
                 int pos = (int)SendMessage(slider, TBM_GETPOS, 0, 0);
                 if (ctx) ctx->staging.speed = pos;
+                RecomputeDirtyState(hDlg, ctx);
 
                 TCHAR label[32];
                 wsprintf(label, _T("Scroll Speed: %d"), pos);
@@ -3536,6 +3755,7 @@ namespace {
                             ctx->staging.gap1 = newPos;
                         else if (nmhdr->idFrom == IDC_GAP2_SPIN)
                             ctx->staging.gap2 = newPos;
+                        RecomputeDirtyState(hDlg, ctx);
                     }
                 }
                 return TRUE;
@@ -3544,6 +3764,27 @@ namespace {
             case WM_COMMAND:
             {
                 SettingsDialogContext* ctx = (SettingsDialogContext*)GetWindowLongPtr(hDlg, GWLP_USERDATA);
+
+                // v4.2.0：設定ダイアログでの変更検知（Applyボタンの活性化・
+                // OK時の再読み込み要否判定に使う）。フォーマット文字列の
+                // 編集欄は、値がctx->stagingではなくエディットボックス自体に
+                // 保持されるため、テキストが実際に変化した時（EN_CHANGE）に
+                // ここで直接判定する（フォーカスの移動だけでは変更扱いに
+                // しない）。それ以外の設定項目（チェックボックス・コンボ・
+                // スライダー等）は、各分岐が実際にctx->stagingへ値を
+                // 書き込んだ「後」で判定する必要があるため、ここでは行わず
+                // 各分岐の中でRecomputeDirtyState()を呼ぶ
+                if (ctx)
+                {
+                    UINT cmdId = LOWORD(wp);
+                    UINT notifyCode = HIWORD(wp);
+                    bool isFormatEdit = (cmdId == IDC_FORMAT_EDIT || cmdId == IDC_FORMAT2_EDIT);
+
+                    if (isFormatEdit && notifyCode == EN_CHANGE)
+                    {
+                        RecomputeDirtyState(hDlg, ctx);
+                    }
+                }
 
                 if (LOWORD(wp) == IDC_FONT_BUTTON)
                 {
@@ -3556,7 +3797,11 @@ namespace {
                     cf.Flags = CF_INITTOLOGFONTSTRUCT | CF_SCREENFONTS;
 
                     if (ChooseFont(&cf) && ctx)
+                    {
                         ctx->staging.font = lf;
+                        RecomputeDirtyState(hDlg, ctx);
+                    }
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_THEME_CHECK)
@@ -3569,6 +3814,7 @@ namespace {
                     EnableWindow(GetDlgItem(hDlg, IDC_NOART_COLOR_BTN), !checked && ctx && !ctx->staging.noArtUseImage);
                     EnableWindow(GetDlgItem(hDlg, IDC_HOVER_FRAME_COLOR_BTN), !checked && ctx && ctx->staging.showHoverFrame);
                     UpdateTextGroupEnables(hDlg, ctx);
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_ARTWORK_QUALITY_COMBO && HIWORD(wp) == CBN_SELCHANGE)
@@ -3577,6 +3823,7 @@ namespace {
                     int idx = (int)SendMessage(combo, CB_GETCURSEL, 0, 0);
                     int value = (int)SendMessage(combo, CB_GETITEMDATA, idx, 0);
                     if (ctx) ctx->staging.artworkQuality = value;
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_NOART_MODE_IMAGE)
@@ -3588,6 +3835,7 @@ namespace {
                     EnableWindow(GetDlgItem(hDlg, IDC_NOART_COLOR_BTN),
                         ctx && !ctx->staging.useThemeColors && !checked);
                     EnableWindow(GetDlgItem(hDlg, IDC_NOART_IMAGE_BROWSE_BTN), checked);
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_BG_MODE_IMAGE)
@@ -3601,6 +3849,7 @@ namespace {
                     EnableWindow(GetDlgItem(hDlg, IDC_BG_IMAGE_BROWSE_BTN), checked);
                     EnableWindow(GetDlgItem(hDlg, IDC_BG_IMAGE_QUALITY_COMBO),
                         checked && ctx && !ctx->staging.stabilityMode);
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_NOART_IMAGE_BROWSE_BTN)
@@ -3619,7 +3868,9 @@ namespace {
                         pfc::stringcvt::string_utf8_from_os utf8Path(pathBuf);
                         ctx->staging.noArtImagePath = utf8Path.get_ptr();
                         SetWindowText(GetDlgItem(hDlg, IDC_NOART_IMAGE_EDIT), pathBuf);
+                        RecomputeDirtyState(hDlg, ctx);
                     }
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_BG_IMAGE_BROWSE_BTN)
@@ -3638,7 +3889,9 @@ namespace {
                         pfc::stringcvt::string_utf8_from_os utf8Path(pathBuf);
                         ctx->staging.bgImagePath = utf8Path.get_ptr();
                         SetWindowText(GetDlgItem(hDlg, IDC_BG_IMAGE_EDIT), pathBuf);
+                        RecomputeDirtyState(hDlg, ctx);
                     }
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_BG_IMAGE_QUALITY_COMBO && HIWORD(wp) == CBN_SELCHANGE)
@@ -3646,6 +3899,7 @@ namespace {
                     HWND combo = GetDlgItem(hDlg, IDC_BG_IMAGE_QUALITY_COMBO);
                     int idx = (int)SendMessage(combo, CB_GETCURSEL, 0, 0);
                     if (ctx) ctx->staging.bgImageQuality = idx;
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_BG_COLOR_BTN)
@@ -3664,7 +3918,9 @@ namespace {
                         if (ctx->hBgBrush) DeleteObject(ctx->hBgBrush);
                         ctx->hBgBrush = CreateSolidBrush(cc.rgbResult);
                         InvalidateRect(GetDlgItem(hDlg, IDC_BG_COLOR_SWATCH), NULL, TRUE);
+                        RecomputeDirtyState(hDlg, ctx);
                     }
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_TEXT_COLOR_BTN)
@@ -3683,7 +3939,9 @@ namespace {
                         if (ctx->hTextBrush) DeleteObject(ctx->hTextBrush);
                         ctx->hTextBrush = CreateSolidBrush(cc.rgbResult);
                         InvalidateRect(GetDlgItem(hDlg, IDC_TEXT_COLOR_SWATCH), NULL, TRUE);
+                        RecomputeDirtyState(hDlg, ctx);
                     }
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_NOART_COLOR_BTN)
@@ -3702,7 +3960,9 @@ namespace {
                         if (ctx->hNoArtBrush) DeleteObject(ctx->hNoArtBrush);
                         ctx->hNoArtBrush = CreateSolidBrush(cc.rgbResult);
                         InvalidateRect(GetDlgItem(hDlg, IDC_NOART_COLOR_SWATCH), NULL, TRUE);
+                        RecomputeDirtyState(hDlg, ctx);
                     }
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_HWACCEL_CHECK)
@@ -3716,6 +3976,7 @@ namespace {
                     // コンボは無効化する（設定が効いていないという誤解を防ぐため）
                     EnableWindow(GetDlgItem(hDlg, IDC_ARTWORK_QUALITY_COMBO),
                         !checked && ctx && !ctx->staging.stabilityMode);
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_HOVER_FRAME_CHECK)
@@ -3726,6 +3987,7 @@ namespace {
 
                     EnableWindow(GetDlgItem(hDlg, IDC_HOVER_FRAME_COLOR_BTN),
                         checked && ctx && !ctx->staging.useThemeColors);
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_HOVER_FRAME_COLOR_BTN)
@@ -3744,7 +4006,9 @@ namespace {
                         if (ctx->hHoverFrameBrush) DeleteObject(ctx->hHoverFrameBrush);
                         ctx->hHoverFrameBrush = CreateSolidBrush(cc.rgbResult);
                         InvalidateRect(GetDlgItem(hDlg, IDC_HOVER_FRAME_COLOR_SWATCH), NULL, TRUE);
+                        RecomputeDirtyState(hDlg, ctx);
                     }
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_ADD_LINE_BTN)
@@ -3753,6 +4017,7 @@ namespace {
                     bool checked = (SendMessage(check, BM_GETCHECK, 0, 0) == BST_CHECKED);
                     if (ctx) ctx->staging.useSecondLine = checked;
                     UpdateTextGroupEnables(hDlg, ctx);
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                     }
                 else if (LOWORD(wp) == IDC_FIXTEXTPOS_CHECK)
@@ -3760,6 +4025,7 @@ namespace {
                     HWND check = GetDlgItem(hDlg, IDC_FIXTEXTPOS_CHECK);
                     if (ctx) ctx->staging.fixTextPosition = (SendMessage(check, BM_GETCHECK, 0, 0) == BST_CHECKED);
                     UpdateTextGroupEnables(hDlg, ctx);
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_SHOWNAME_CHECK)
@@ -3767,34 +4033,40 @@ namespace {
                     HWND check = GetDlgItem(hDlg, IDC_SHOWNAME_CHECK);
                     if (ctx) ctx->staging.showAlbumName = (SendMessage(check, BM_GETCHECK, 0, 0) == BST_CHECKED);
                     UpdateTextGroupEnables(hDlg, ctx);
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_WHEEL_CHECK)
                 {
                     HWND check = GetDlgItem(hDlg, IDC_WHEEL_CHECK);
                     if (ctx) ctx->staging.wheelScroll = (SendMessage(check, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_PERSPECTIVE_CHECK)
                 {
                     HWND check = GetDlgItem(hDlg, IDC_PERSPECTIVE_CHECK);
                     if (ctx) ctx->staging.perspective = (SendMessage(check, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_SHOWNOART_CHECK)
                 {
                     HWND check = GetDlgItem(hDlg, IDC_SHOWNOART_CHECK);
                     if (ctx) ctx->staging.showNoArt = (SendMessage(check, BM_GETCHECK, 0, 0) == BST_CHECKED);
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_DIR_LTR)
                 {
                     if (ctx) ctx->staging.scrollRTL = false;
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_DIR_RTL)
                 {
                     if (ctx) ctx->staging.scrollRTL = true;
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_MODE_CUSTOM)
@@ -3804,6 +4076,7 @@ namespace {
                     EnableWindow(GetDlgItem(hDlg, IDC_ARTWORK_QUALITY_COMBO), ctx && !ctx->staging.hwAccel);
                     EnableWindow(GetDlgItem(hDlg, IDC_BG_IMAGE_QUALITY_COMBO), ctx && ctx->staging.bgUseImage);
                     EnableWindow(GetDlgItem(hDlg, IDC_HWACCEL_CHECK), IsNvidiaGpuAvailable());
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDC_MODE_STABILITY)
@@ -3831,16 +4104,24 @@ namespace {
                     SendMessage(hwAccelCheck, BM_SETCHECK, BST_UNCHECKED, 0);
                     EnableWindow(hwAccelCheck, FALSE);
                     if (ctx) ctx->staging.hwAccel = false;
+                    RecomputeDirtyState(hDlg, ctx);
                     return TRUE;
                     }
                 else if (LOWORD(wp) == IDC_APPLY_BTN)
                 {
-                    if (ctx) CommitSettings(hDlg, ctx);
+                    if (ctx)
+                    {
+                        CommitSettings(hDlg, ctx);
+                        SnapshotBaselineFromCurrent(hDlg, ctx);
+                        ClearSettingsDirty(hDlg, ctx);
+                    }
                     return TRUE;
                 }
                 else if (LOWORD(wp) == IDOK)
                 {
-                    if (ctx) CommitSettings(hDlg, ctx);
+                    // v4.2.0：何も変更されていない場合は、CommitSettings（＝
+                    // アルバムトレインの再読み込み）を行わずに閉じる
+                    if (ctx && ctx->isDirty) CommitSettings(hDlg, ctx);
                     EndDialog(hDlg, IDOK);
                     return TRUE;
                 }
