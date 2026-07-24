@@ -2462,7 +2462,7 @@ namespace {
                     SetTextColor(bufDC, GetTextColor());
                     SetBkMode(bufDC, TRANSPARENT);
                     pfc::stringcvt::string_os_from_utf8 name_t(entry.display_name);
-                    DrawText(bufDC, name_t, -1, &nameRc, DT_CENTER | DT_END_ELLIPSIS);
+                    DrawText(bufDC, name_t, -1, &nameRc, DT_CENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
 
                     // 2行目が有効な場合は、その下にもう1行描画する
                     if (g_cfg_use_second_line.get())
@@ -2477,7 +2477,7 @@ namespace {
                             (int)(line2TopY + lineHeight + 0.5f)
                         };
                         pfc::stringcvt::string_os_from_utf8 name2_t(entry.display_name2);
-                        DrawText(bufDC, name2_t, -1, &nameRc2, DT_CENTER | DT_END_ELLIPSIS);
+                        DrawText(bufDC, name2_t, -1, &nameRc2, DT_CENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
                     }
                 }
             }
